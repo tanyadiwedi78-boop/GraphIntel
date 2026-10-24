@@ -1,0 +1,30 @@
+{
+  "entity_types": [
+    "Company",
+    "Subsidiary",
+    "Industry",
+    "Technology",
+    "Risk",
+    "FinancialMetric",
+    "Product"
+  ],
+  "relations": {
+    "OWNS": {"source": "Company", "target": "Subsidiary"},
+    "OPERATES_IN": {"source": "Company", "target": "Industry"},
+    "COMPETES_WITH": {"source": "Company", "target": "Company"},
+    "DEPENDS_ON": {"source": "Company", "target": "Company"},
+    "DEVELOPS": {"source": "Company", "target": "Technology"},
+    "FACES": {"source": "Company", "target": "Risk"},
+    "REPORTS": {"source": "Company", "target": "FinancialMetric"},
+    "ACQUIRED": {"source": "Company", "target": "Company"},
+    "MENTIONS": {"source": "Company", "target": "Product"}
+  },
+  "edge_fields": [
+    "source_chunk_id",
+    "evidence_quote",
+    "filing_accession",
+    "form_type",
+    "period",
+    "confidence"
+  ]
+}

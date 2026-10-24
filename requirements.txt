@@ -1,0 +1,39 @@
+# Core Dependencies
+pydantic>=2.6
+pydantic-settings>=2.2
+pyyaml>=6.0
+python-dotenv>=1.0
+httpx>=0.27
+tenacity>=8.2
+tqdm>=4.66
+numpy>=1.26
+pandas>=2.1
+orjson>=3.9
+rich>=13.7
+
+# Parsing
+pypdf>=4.0
+beautifulsoup4>=4.12
+lxml>=5.0
+
+# Embeddings & Language Models
+sentence-transformers>=3.0
+tokenizers>=0.19
+huggingface_hub>=0.23
+openai>=1.30.0
+anthropic>=0.25.0
+
+# Graph & Vector Databases
+neo4j>=5.20
+psycopg[binary]>=3.1
+pgvector>=0.2.5
+
+# API Service
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+# Testing & Quality
+pytest>=8.0
+pytest-cov>=5.0
+ruff>=0.5
+mypy>=1.10
