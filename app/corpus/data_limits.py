@@ -11,6 +11,7 @@ MAX_COMPANIES = 20
 
 class PlanError(ValueError):
     """The corpus plan file is missing or breaks a rule."""
+    pass
 
 
 @dataclass(frozen=True)
