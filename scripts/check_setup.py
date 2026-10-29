@@ -32,7 +32,9 @@ def main() -> int:
     else:
         print(" Companies_Sec Fillings Number (CIK)")
     if "@" not in settings.edgar_user_agent:
-        print("  EDGAR_USER_AGENT missing")
+        print("Error : EDGAR_USER_AGENT missing (.env)")
+        return 1
+    print("EDGAR_USER_AGENT OK")
     return 0
 
 

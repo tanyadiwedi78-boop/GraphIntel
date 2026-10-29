@@ -11,7 +11,8 @@ MIN_RELATION_TYPES, MAX_RELATION_TYPES = 8, 15
 
 
 class OntologyError(ValueError):
-    """The ontology file is missing, malformed or outside the limits."""
+    pass
+    
 
 
 @dataclass(frozen=True)
