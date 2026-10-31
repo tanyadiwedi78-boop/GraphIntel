@@ -38,7 +38,7 @@ EXPECTED_PATHS: Tuple[str, ...] = (
     "pytest.ini",
     ".gitignore",
     "readme.md",
-    ".env",
+    ".env.example",
 )
 
 
