@@ -13,6 +13,12 @@ PARSER_VERSION = "p1"  # bump when block extraction or normalization changes
 WHOLE_DOCUMENT = "DOCUMENT"
 MIN_ITEMS_FOR_SPLIT = 3
 CAPTION_MAX_CHARS = 300
+# real filings print a running footer on every page, e.g. "Apple Inc. | 2023 Form 10-K | 19".
+# Only that full footer shape (issuer | year form | page, pipe-separated, anchored)
+# is removed; a sentence that merely mentions a form ("See Form 10-K for 2023")
+# always survives, as do genuine repeated disclosures ("Not applicable.", "None.").
+PAGE_FOOTER_MAX_CHARS = 60
+PAGE_FOOTER_FORM = re.compile(r"^.*\|\s*\d{4}\s+form\s+(10-K|10-Q|8-K)\s*\|\s*\d+\s*$", re.IGNORECASE)
 FOOTNOTE_MARKER = re.compile(r"^\s*(\(\d{1,2}\)|\([a-z]\)|[*\u2020\u2021#])\s")
 
 
@@ -117,6 +123,12 @@ def _text_blocks(text: str) -> Tuple[Block, ...]:
     return tuple(blocks)
 
 
+def _clean(text: str) -> str:
+    # real filings use non-breaking spaces and long space runs for alignment;
+    # browsers collapse them, so evidence text should read like the page
+    return re.sub(r"\s+", " ", text.replace("\xa0", " "))
+
+
 def _walk(element: Tag, items: list) -> None:
     for child in element.children:
         if not isinstance(child, Tag):
@@ -126,7 +138,7 @@ def _walk(element: Tag, items: list) -> None:
         elif child.find(["table", "p", "div", "h1", "h2", "h3", "h4", "h5", "h6"]):
             _walk(child, items)
         else:
-            text = child.get_text(" ", strip=True)
+            text = _clean(child.get_text(" ", strip=True))
             if text:
                 items.append(("paragraph", text))
 
@@ -140,7 +152,7 @@ def _html_table(tag: Tag) -> Optional[Tuple[Tuple[str, ...], Tuple[Tuple[str, ..
             cell_tags = tr.find_all(["td", "th"])
         cells = []
         for cell_tag in cell_tags:
-            cells.append(cell_tag.get_text(" ", strip=True))
+            cells.append(_clean(cell_tag.get_text(" ", strip=True)))
         has_text = False
         for cell in cells:
             if cell:
@@ -190,6 +202,19 @@ def _with_offsets(blocks: Tuple[Block, ...]) -> Tuple[Tuple[Block, ...], str]:
     return tuple(placed), "\n\n".join(parts)
 
 
+def _drop_page_furniture(blocks: Tuple[Block, ...]) -> Tuple[Block, ...]:
+    """Remove only explicit running page footers that name the form
+    ("... | 2023 Form 10-K | 19"). Bare numbers, bullets and everything
+    else are kept - they can be real content."""
+    kept = []
+    for b in blocks:
+        if b.kind == "paragraph":
+            if len(b.text) <= PAGE_FOOTER_MAX_CHARS and PAGE_FOOTER_FORM.search(b.text):
+                continue
+        kept.append(b)
+    return tuple(kept)
+
+
 def to_blocks(raw: str, suffix: str) -> Tuple[Tuple[Block, ...], str]:
     """Typed blocks and the normalized text from one raw filing body."""
     if suffix in {".htm", ".html"}:
@@ -197,9 +222,12 @@ def to_blocks(raw: str, suffix: str) -> Tuple[Tuple[Block, ...], str]:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             soup = BeautifulSoup(raw, "lxml")
+        # real filings hide XBRL metadata in ix: tags; it is machine data, not page text
+        for junk in soup.find_all(re.compile(r"^ix:(header|hidden|references|resources)$")):
+            junk.decompose()
         items: list = []
         _walk(soup.body or soup, items)
-        blocks = _associate(items)
+        blocks = _drop_page_furniture(_associate(items))
     else:
         blocks = _text_blocks(raw)
     return _with_offsets(blocks)
