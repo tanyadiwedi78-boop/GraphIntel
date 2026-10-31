@@ -35,7 +35,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence, Tuple
 
-from app.corpus.filing_parser import Block
+from app.corpus.filling_parser import Block
 
 DEFAULT_TOKEN_LIMIT = 800
 CHARS_PER_TOKEN = 4

@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.config import ConfigError, load_settings
 from app.corpus.chunking import DEFAULT_TOKEN_LIMIT, chunk_section, chunking_fingerprint
 from app.corpus.edgar import load_saved_filings
-from app.corpus.filing_parser import PARSER_VERSION, load_chunking_version, load_section_rules, parse_filing
+from app.corpus.filling_parser import PARSER_VERSION, load_chunking_version, load_section_rules, parse_filing
 
 
 def main() -> int:
