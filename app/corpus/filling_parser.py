@@ -7,16 +7,12 @@ from pathlib import Path
 from typing import Mapping, Optional, Sequence, Tuple
 
 import yaml
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, NavigableString ,Tag
 
-PARSER_VERSION = "p1"  # bump when block extraction or normalization changes
+PARSER_VERSION = "p2"  # bump when block extraction or normalization changes
 WHOLE_DOCUMENT = "DOCUMENT"
 MIN_ITEMS_FOR_SPLIT = 3
 CAPTION_MAX_CHARS = 300
-# real filings print a running footer on every page, e.g. "Apple Inc. | 2023 Form 10-K | 19".
-# Only that full footer shape (issuer | year form | page, pipe-separated, anchored)
-# is removed; a sentence that merely mentions a form ("See Form 10-K for 2023")
-# always survives, as do genuine repeated disclosures ("Not applicable.", "None.").
 PAGE_FOOTER_MAX_CHARS = 60
 PAGE_FOOTER_FORM = re.compile(r"^.*\|\s*\d{4}\s+form\s+(10-K|10-Q|8-K)\s*\|\s*\d+\s*$", re.IGNORECASE)
 FOOTNOTE_MARKER = re.compile(r"^\s*(\(\d{1,2}\)|\([a-z]\)|[*\u2020\u2021#])\s")
@@ -129,12 +125,39 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("\xa0", " "))
 
 
+def _unwrap_layout_table(tag: Tag) -> Tag:
+    current = tag
+    while True:
+        own_rows = [tr for tr in current.find_all("tr") if tr.find_parent("table") is current]
+        if len(own_rows) != 1:
+            return current
+        cells = own_rows[0].find_all(["td", "th"], recursive=False)
+        if len(cells) != 1:
+            return current
+        inner = cells[0].find("table")
+        if inner is None:
+            return current
+        # unwrap only when the cell carries nothing but the inner table
+        cell_text = _clean(cells[0].get_text(" ", strip=True))
+        inner_text = _clean(inner.get_text(" ", strip=True))
+        if cell_text != inner_text:
+            return current
+        current = inner
+
+
 def _walk(element: Tag, items: list) -> None:
     for child in element.children:
         if not isinstance(child, Tag):
+            # plain text sitting directly inside a container that also holds
+            # block tags (or directly under <body>) is real page text - keep
+            # it. Comments, DOCTYPE and XML declarations are not page text.
+            if type(child) is NavigableString:
+                text = _clean(str(child)).strip()
+                if text:
+                    items.append(("paragraph", text))
             continue
         if child.name == "table":
-            items.append(("table", child))
+            items.append(("table", _unwrap_layout_table(child)))
         elif child.find(["table", "p", "div", "h1", "h2", "h3", "h4", "h5", "h6"]):
             _walk(child, items)
         else:
@@ -144,9 +167,10 @@ def _walk(element: Tag, items: list) -> None:
 
 
 def _html_table(tag: Tag) -> Optional[Tuple[Tuple[str, ...], Tuple[Tuple[str, ...], ...]]]:
-    
     rows = []
     for tr in tag.find_all("tr"):
+        if tr.find_parent("table") is not tag:
+            continue
         cell_tags = tr.find_all(["td", "th"], recursive=False)
         if not cell_tags:
             cell_tags = tr.find_all(["td", "th"])

@@ -107,7 +107,7 @@ def test_html_paragraphs_keep_the_words_lose_the_tags():
 
 
 def test_html_table_keeps_its_structure_caption_and_footnotes():
-    blocks, _ = to_blocks(HTML_TABLE, ".html")
+    blocks, _ = to_blocks(HTML_TABLE, ".htm")
     tables = []
     for block in blocks:
         if block.kind == "table":

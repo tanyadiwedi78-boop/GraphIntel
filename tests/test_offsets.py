@@ -1,11 +1,3 @@
-"""Pin the offset contract between the parser and the chunker.
-
-Every block and chunk start/end is an offset into the parser's NORMALIZED
-text (never the raw filing bytes): a packed chunk's text is exactly
-normalized[start:end], and a table split part's offsets cover only its own
-rows (plus footnotes on the last part) while its text repeats the header.
-"""
-
 from app.corpus.chunking import chunk_blocks, chunk_section
 from app.corpus.filling_parser import Block, to_blocks
 

@@ -26,7 +26,7 @@ def main() -> int:
     try:
 
         settings = load_settings()
-        rules_path = Path("configs/filing_sections.yaml")
+        rules_path = Path("configs/filling_sections.yaml")
         rules = load_section_rules(rules_path)
         chunk_version = load_chunking_version(rules_path)
         chunk_config = chunking_fingerprint(
