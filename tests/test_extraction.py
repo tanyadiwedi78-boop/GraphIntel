@@ -1,0 +1,279 @@
+"""Offline tests for the resumable extraction job. No network, no API key.
+"""
+
+import json
+import os
+
+import pytest
+
+from app.extraction.errors import ProviderError, backoff_seconds, classify_status, RETRY_LATER, STOP_RUN
+from app.extraction.ledger import already_done, make_work_key, result_path, save_result
+from app.extraction.prompt import PROMPT_VERSION, SCHEMA_VERSION
+from app.extraction.runner import RunLimits, run_extraction
+from app.extraction.schema import validate_extraction
+from app.graph.ontology import load_ontology
+from tests.fake_model import FakeModel, good_answer
+
+QUOTE = "Acme develops the Widget Engine"
+
+
+@pytest.fixture
+def ontology():
+    return load_ontology("configs/ontology.json")
+
+
+def make_chunk(number):
+    return {
+        "chunk_id": f"chunk-{number}",
+        "text": f"Item {number}. {QUOTE} for\n customers.",
+        "accession": "0000000000-26-000001",
+        "form": "10-K",
+        "period": "2026-01-31",
+    }
+
+
+def no_sleep_recorder():
+    waits = []
+
+    def sleep(seconds):
+        waits.append(seconds)
+
+    return sleep, waits
+
+
+def quick_limits(**changes):
+    values = dict(max_calls=100, max_attempts_per_chunk=3, base_wait_seconds=1.0,
+                max_wait_seconds=60.0, jitter_fraction=0.0, stop_after_failed_chunks=5)
+    values.update(changes)
+    return RunLimits(**values)
+
+
+# ---------- validation: provenance, not truth ----------
+
+def test_valid_answer_gets_edge_fields_from_our_chunk(ontology):
+    chunk = make_chunk(1)
+    ok, problems, edges = validate_extraction(good_answer(QUOTE), chunk, ontology)
+    assert ok, problems
+    assert edges[0]["source_chunk_id"] == "chunk-1"
+    assert edges[0]["filing_accession"] == "0000000000-26-000001"
+    assert edges[0]["form_type"] == "10-K"
+    assert edges[0]["period"] == "2026-01-31"
+
+
+def test_quote_spacing_differences_are_allowed(ontology):
+    ok, _, _ = validate_extraction(good_answer("Acme develops  the Widget Engine"), make_chunk(1), ontology)
+    assert ok
+
+
+def test_quote_not_in_chunk_is_invalid(ontology):
+    ok, problems, edges = validate_extraction(good_answer("Acme invented time travel"), make_chunk(1), ontology)
+    assert not ok
+    assert edges == []
+    assert "evidence_quote does not appear" in problems[0]
+
+
+def test_relation_outside_ontology_is_invalid(ontology):
+    bad = json.loads(good_answer(QUOTE))
+    bad["relations"][0]["target_type"] = "Company"   # DEVELOPS must end at Technology
+    ok, problems, _ = validate_extraction(json.dumps(bad), make_chunk(1), ontology)
+    assert not ok
+    assert "not in the ontology" in problems[0]
+
+
+def test_not_json_and_wrong_shape_are_invalid(ontology):
+    assert not validate_extraction("sorry, here you go", make_chunk(1), ontology)[0]
+    assert not validate_extraction('{"things": []}', make_chunk(1), ontology)[0]
+
+
+def test_confidence_must_be_between_0_and_1(ontology):
+    bad = json.loads(good_answer(QUOTE))
+    bad["relations"][0]["confidence"] = 7
+    assert not validate_extraction(json.dumps(bad), make_chunk(1), ontology)[0]
+
+
+def test_empty_relation_list_is_valid(ontology):
+    ok, _, edges = validate_extraction('{"relations": []}', make_chunk(1), ontology)
+    assert ok and edges == []
+
+
+# ---------- errors and waits ----------
+
+def test_which_statuses_are_retried():
+    assert classify_status(429) == RETRY_LATER
+    assert classify_status(408) == RETRY_LATER
+    assert classify_status(503) == RETRY_LATER
+    assert classify_status(400) == STOP_RUN
+    assert classify_status(403) == STOP_RUN
+
+
+def test_backoff_doubles_and_is_capped():
+    assert backoff_seconds(1, 1.0, 60.0) == 1.0
+    assert backoff_seconds(2, 1.0, 60.0) == 2.0
+    assert backoff_seconds(3, 1.0, 60.0) == 4.0
+    assert backoff_seconds(30, 1.0, 60.0) == 60.0
+
+
+# ---------- the job ----------
+
+def test_three_attempts_means_two_waits_then_chunk_is_failed(ontology, tmp_path):
+    model = FakeModel([ProviderError(429), ProviderError(429), ProviderError(429)])
+    sleep, waits = no_sleep_recorder()
+    summary = run_extraction([make_chunk(1)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert len(model.calls) == 3
+    assert waits == [1.0, 2.0]
+    assert summary["failed"] == 1
+    assert summary["valid"] == 0
+
+
+def test_retry_after_is_honored_when_longer_than_backoff(ontology, tmp_path):
+    model = FakeModel([ProviderError(429, retry_after_seconds=20), good_answer(QUOTE)])
+    sleep, waits = no_sleep_recorder()
+    summary = run_extraction([make_chunk(1)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert waits == [20]
+    assert summary["valid"] == 1
+
+
+def test_retry_after_longer_than_limit_stops_the_run(ontology, tmp_path):
+    model = FakeModel([ProviderError(429, retry_after_seconds=600)])
+    sleep, waits = no_sleep_recorder()
+    summary = run_extraction([make_chunk(1), make_chunk(2)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert summary["stopped_early"]
+    assert "longer than the limit" in summary["stop_reason"]
+    assert waits == []
+    assert len(model.calls) == 1
+
+
+def test_setup_error_is_not_retried_and_stops(ontology, tmp_path):
+    model = FakeModel([ProviderError(403, "bad key")])
+    sleep, waits = no_sleep_recorder()
+    summary = run_extraction([make_chunk(1), make_chunk(2)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert summary["stopped_early"]
+    assert len(model.calls) == 1
+    assert waits == []
+
+
+def test_invalid_answer_is_retried_at_once_without_waiting(ontology, tmp_path):
+    model = FakeModel(["not json", good_answer(QUOTE)])
+    sleep, waits = no_sleep_recorder()
+    summary = run_extraction([make_chunk(1)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert summary["valid"] == 1
+    assert waits == []
+    assert len(model.calls) == 2
+
+
+def test_invalid_after_all_attempts_is_saved_with_raw_response(ontology, tmp_path):
+    model = FakeModel(["bad1", "bad2", "bad3"])
+    sleep, _ = no_sleep_recorder()
+    summary = run_extraction([make_chunk(1)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert summary["invalid"] == 1
+    files = os.listdir(tmp_path)
+    saved = json.load(open(os.path.join(tmp_path, files[0])))
+    assert saved["status"] == "invalid"
+    assert saved["raw_response"] == "bad3"
+
+
+def test_call_cap_stops_run_then_second_run_finishes_without_repeats(ontology, tmp_path):
+    chunks = [make_chunk(1), make_chunk(2), make_chunk(3), make_chunk(4)]
+    sleep, _ = no_sleep_recorder()
+
+    first_model = FakeModel([good_answer(QUOTE), good_answer(QUOTE)])
+    first = run_extraction(chunks, first_model, ontology, "m", str(tmp_path), quick_limits(max_calls=2), sleep)
+    assert first["valid"] == 2
+    assert first["stopped_early"] and first["stop_reason"] == "call cap reached"
+
+    second_model = FakeModel([good_answer(QUOTE), good_answer(QUOTE)])
+    second = run_extraction(chunks, second_model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert second["skipped_done"] == 2
+    assert second["valid"] == 2
+    assert len(second_model.calls) == 2          # only the two unfinished chunks
+    assert not second["stopped_early"]
+
+
+def test_finished_run_repeated_makes_no_calls(ontology, tmp_path):
+    chunks = [make_chunk(1), make_chunk(2)]
+    sleep, _ = no_sleep_recorder()
+    run_extraction(chunks, FakeModel([good_answer(QUOTE)] * 2), ontology, "m", str(tmp_path), quick_limits(), sleep)
+    again = FakeModel([])
+    summary = run_extraction(chunks, again, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert again.calls == []
+    assert summary["skipped_done"] == 2
+
+
+def test_crash_between_answer_and_save_repeats_that_one_call(ontology, tmp_path):
+    """The honest limit: at-least-once. The provider answered, we died before saving."""
+    chunks = [make_chunk(1), make_chunk(2), make_chunk(3)]
+    sleep, _ = no_sleep_recorder()
+    saves = []
+
+    def crashing_save(results_dir, chunk_id, work_key, record):
+        if chunk_id == "chunk-2":
+            raise KeyboardInterrupt("simulated crash before the file was written")
+        save_result(results_dir, chunk_id, work_key, record)
+        saves.append(chunk_id)
+
+    first_model = FakeModel([good_answer(QUOTE), good_answer(QUOTE)])
+    with pytest.raises(KeyboardInterrupt):
+        run_extraction(chunks, first_model, ontology, "m", str(tmp_path), quick_limits(), sleep, crashing_save)
+    assert len(first_model.calls) == 2           # chunk-2 WAS answered by the provider
+
+    second_model = FakeModel([good_answer(QUOTE), good_answer(QUOTE)])
+    summary = run_extraction(chunks, second_model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert len(second_model.calls) == 2          # chunk-2 paid for twice, chunk-3 once
+    assert summary["valid"] == 2 and summary["skipped_done"] == 1
+
+
+def test_leftover_temp_file_is_ignored(ontology, tmp_path):
+    chunk = make_chunk(1)
+    key = make_work_key(chunk, ontology.fingerprint(), SCHEMA_VERSION, PROMPT_VERSION, "m")
+    open(result_path(str(tmp_path), "chunk-1", key) + ".tmp", "w").write("{half a file")
+    assert not already_done(str(tmp_path), "chunk-1", key)
+
+
+def test_changing_any_part_of_the_recipe_changes_the_key(ontology):
+    chunk = make_chunk(1)
+    fp = ontology.fingerprint()
+    base = make_work_key(chunk, fp, "s1", "p1", "m1")
+    assert base == make_work_key(chunk, fp, "s1", "p1", "m1")
+    assert base != make_work_key(chunk, fp, "s1", "p2", "m1")
+    assert base != make_work_key(chunk, fp, "s2", "p1", "m1")
+    assert base != make_work_key(chunk, fp, "s1", "p1", "m2")
+    assert base != make_work_key(chunk, "otherfp", "s1", "p1", "m1")
+    changed = dict(chunk)
+    changed["text"] = chunk["text"] + " more"
+    assert base != make_work_key(changed, fp, "s1", "p1", "m1")
+
+
+def test_new_model_name_reruns_the_chunk(ontology, tmp_path):
+    chunks = [make_chunk(1)]
+    sleep, _ = no_sleep_recorder()
+    run_extraction(chunks, FakeModel([good_answer(QUOTE)]), ontology, "model-a", str(tmp_path), quick_limits(), sleep)
+    other = FakeModel([good_answer(QUOTE)])
+    run_extraction(chunks, other, ontology, "model-b", str(tmp_path), quick_limits(), sleep)
+    assert len(other.calls) == 1
+
+
+def test_stops_after_too_many_failed_chunks_in_a_row(ontology, tmp_path):
+    chunks = [make_chunk(1), make_chunk(2), make_chunk(3)]
+    model = FakeModel([ProviderError(503)] * 4)
+    sleep, _ = no_sleep_recorder()
+    summary = run_extraction(
+        chunks, model, ontology, "m", str(tmp_path),
+        quick_limits(max_attempts_per_chunk=2, stop_after_failed_chunks=2), sleep,
+    )
+    assert summary["failed"] == 2
+    assert summary["stopped_early"]
+    assert len(model.calls) == 4
+
+
+def test_failed_and_invalid_results_are_tried_again_next_run(ontology, tmp_path):
+    chunks = [make_chunk(1), make_chunk(2)]
+    sleep, _ = no_sleep_recorder()
+    first = FakeModel([ProviderError(503), ProviderError(503), ProviderError(503), "bad", "bad", "bad"])
+    summary = run_extraction(chunks, first, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert summary["failed"] == 1 and summary["invalid"] == 1
+
+    second = FakeModel([good_answer(QUOTE), good_answer(QUOTE)])
+    again = run_extraction(chunks, second, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert again["valid"] == 2
+    assert again["skipped_done"] == 0
+    assert len(second.calls) == 2
