@@ -101,44 +101,66 @@ def run_extraction(
 
         prompt = build_prompt(chunk, ontology)
 
-
+        attempt = 0
         outcome = "failed"
         problems: List[str] = []
         edges: List[dict] = []
-        
+        raw_text = ""
+        last_error_text = ""
+        chunk_start = clock()
+        chunk_retry_wait = 0.0
 
         while attempt < limits.max_attempts_per_chunk:
             if summary["calls_used"] >= limits.max_calls:
                 summary["stopped_early"] = True
                 summary["stop_reason"] = "call cap reached"
-                return summary
+                chunk_seconds = clock() - chunk_start
+                emit("chunk_final", chunk, status="stopped", result_reused=False,
+                    attempts=attempt, retries=max(0, attempt - 1), reason="call cap reached",
+                    chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
+                return finish()
 
             attempt = attempt + 1
             summary["calls_used"] = summary["calls_used"] + 1
+            call_start = clock()
             try:
                 raw_text = call_model(prompt)
             except ProviderError as error:
                 last_error_text = str(error)
                 outcome = "failed"
+                metrics = dict(getattr(call_model, "last_metrics", {}))
+                metrics.setdefault("latency_ms", round((clock() - call_start) * 1000, 3))
+                metrics.setdefault("error_type", "http_" + str(error.status_code))
+                emit("attempt", chunk, attempt=attempt, status="failed", metrics=metrics)
                 if classify_status(error.status_code) != RETRY_LATER:
                     summary["stopped_early"] = True
                     summary["stop_reason"] = "setup problem, not retried: " + last_error_text
-                    return summary
+                    chunk_seconds = clock() - chunk_start
+                    emit("chunk_final", chunk, status="stopped", attempts=attempt,
+                        retries=attempt - 1, result_reused=False, reason=summary["stop_reason"],
+                        chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
+                    return finish()
                 if attempt >= limits.max_attempts_per_chunk:
                     break
                 if error.retry_after_seconds is not None and error.retry_after_seconds > limits.max_wait_seconds:
                     summary["stopped_early"] = True
                     summary["stop_reason"] = "provider asked for a wait longer than the limit"
-                    return summary
+                    chunk_seconds = clock() - chunk_start
+                    emit("chunk_final", chunk, status="stopped", attempts=attempt,
+                        retries=attempt - 1, result_reused=False, reason=summary["stop_reason"],
+                        chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
+                    return finish()
                 wait = wait_before_retry(
                     attempt, error, limits.base_wait_seconds, limits.max_wait_seconds, limits.jitter_fraction
                 )
                 sleep(wait)
+                chunk_retry_wait = chunk_retry_wait + wait
+                summary["retry_wait_seconds"] = round(summary["retry_wait_seconds"] + wait, 3)
                 continue
 
             is_valid, problems, edges = validate_extraction(raw_text, chunk, ontology)
             metrics = dict(getattr(call_model, "last_metrics", {}))
-            metrics.setdefault("latency_ms", round((time.perf_counter() - call_start) * 1000, 3))
+            metrics.setdefault("latency_ms", round((clock() - call_start) * 1000, 3))
             validation_status = "invalid"
             if not is_valid:
                 metrics["error_type"] = "validation_failed"
@@ -150,6 +172,7 @@ def run_extraction(
             if is_valid:
                 outcome = "valid"
                 break
+            outcome = "invalid"   # bad answer: try again at once, no wait
 
 
         record = {
@@ -172,11 +195,14 @@ def run_extraction(
         for edge in edges:
             names.add((edge["source_type"], edge["source_name"]))
             names.add((edge["target_type"], edge["target_name"]))
+        chunk_seconds = clock() - chunk_start
+        chunk_times.append(chunk_seconds)
         emit("chunk_final", chunk, status=outcome, result_reused=False,
             attempts=attempt, retries=max(0, attempt - 1),
             valid_first_try=(outcome == "valid" and attempt == 1),
             empty=(outcome == "valid" and len(edges) == 0),
-            edges=len(edges), derived_endpoint_entities=len(names))
+            edges=len(edges), derived_endpoint_entities=len(names),
+            chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
         if outcome == "valid":
             summary["valid"] = summary["valid"] + 1
             failed_in_a_row = 0
@@ -188,6 +214,7 @@ def run_extraction(
             if failed_in_a_row >= limits.stop_after_failed_chunks:
                 summary["stopped_early"] = True
                 summary["stop_reason"] = "too many chunks in a row ran out of attempts"
-                return summary
+                return finish()
 
-    return summary 
+    return finish()
+

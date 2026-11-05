@@ -47,3 +47,16 @@ Running list of changes, newest first.
   Apple FY2023 10-K: 23/23 Item sections, 58 tables, 54 standalone footer
   paragraphs removed; Microsoft FY2026 10-K: 23/23 items, 88 tables, 0 removed
   (no footers match the strict shape - its page noise is kept deliberately).
+
+## 2026-11-05 - completing the extraction slice on main
+
+- `app/extraction/runner.py`: restored lines lost in a partial paste (`attempt = 0`, `raw_text`,
+  `last_error_text`, the `invalid` outcome, per-attempt events, call timing) and finished the
+  timing changes (`chunk_seconds`, `retry_wait_seconds`, `finish()` on every exit path).
+- `app/extraction/schema.py`: the ontology check had no body (IndentationError, nothing could import).
+  It now reports "not in the ontology" again.
+- `scripts/run_extraction.py`: now the complete Gemini + timing version (`--provider echo|gemini`,
+  `--gemini-assume-free`, `--gemini-max-rpm`, `--gemini-max-tpm`, timing lines).
+- New tests: `tests/test_extraction_events.py`, `tests/test_extraction_timing.py`; restored
+  `test_echo_results_are_never_reused_by_a_real_model` in `tests/test_extraction.py`.
+- Result: 109 passed on Linux, Python 3.10. Windows run pending. No live Gemini call has been made.

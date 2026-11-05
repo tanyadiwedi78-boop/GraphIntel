@@ -59,6 +59,9 @@ def validate_extraction(raw_text: str, chunk: dict, ontology: Ontology) -> Tuple
             problems.append(f"{label}: confidence must be between 0 and 1")
 
         if not ontology.allows(item["relation"], item["source_type"], item["target_type"]):
+            problems.append(
+                f"{label}: {item['source_type']} -{item['relation']}-> {item['target_type']} is not in the ontology"
+            )
 
         quote = item["evidence_quote"]
         if isinstance(quote, str) and quote.strip() != "":

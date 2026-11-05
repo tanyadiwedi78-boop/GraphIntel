@@ -277,3 +277,19 @@ def test_failed_and_invalid_results_are_tried_again_next_run(ontology, tmp_path)
     assert again["valid"] == 2
     assert again["skipped_done"] == 0
     assert len(second.calls) == 2
+
+
+def test_echo_results_are_never_reused_by_a_real_model(ontology, tmp_path):
+    """A result saved by the offline placeholder is not skipped for a real model.
+
+    The model name is part of the recipe key, so switching from the echo
+    client to a real model re-extracts instead of trusting placeholder output.
+    """
+    chunks = [make_chunk(1)]
+    sleep, _ = no_sleep_recorder()
+    run_extraction(chunks, FakeModel([good_answer(QUOTE)]), ontology, "echo-placeholder", str(tmp_path), quick_limits(), sleep)
+    real = FakeModel([good_answer(QUOTE)])
+    summary = run_extraction(chunks, real, ontology, "qwen-local", str(tmp_path), quick_limits(), sleep)
+    assert len(real.calls) == 1
+    assert summary["skipped_done"] == 0
+    assert summary["valid"] == 1
