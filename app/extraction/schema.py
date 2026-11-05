@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Dict, List, Tuple
 
 from app.graph.ontology import Ontology
@@ -46,16 +47,18 @@ def validate_extraction(raw_text: str, chunk: dict, ontology: Ontology) -> Tuple
         for key in ["source_name", "target_name", "evidence_quote"]:
             if not isinstance(item[key], str) or item[key].strip() == "":
                 problems.append(f"{label}: {key} must be a non-empty string")
+        for key in ["relation", "source_type", "target_type"]:
+            if not isinstance(item[key], str):
+                problems.append(f"{label}: {key} must be a string")
+        if len(problems) > 0:
+            continue
         confidence = item["confidence"]
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
             problems.append(f"{label}: confidence must be a number")
-        elif confidence < 0 or confidence > 1:
+        elif not math.isfinite(confidence) or confidence < 0 or confidence > 1:
             problems.append(f"{label}: confidence must be between 0 and 1")
 
         if not ontology.allows(item["relation"], item["source_type"], item["target_type"]):
-            problems.append(
-                f"{label}: {item['source_type']} -{item['relation']}-> {item['target_type']} is not in the ontology"
-            )
 
         quote = item["evidence_quote"]
         if isinstance(quote, str) and quote.strip() != "":

@@ -1,8 +1,8 @@
-"""Run extraction over chunks: save as you go, stop cleanly, resume later.
+"""Run extraction over chunks:
 """
 
 from __future__ import annotations
-
+import math
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List
@@ -34,6 +34,8 @@ def run_extraction(
     limits: RunLimits,
     sleep: Callable[[float], None] = time.sleep,
     save: Callable[[str, str, str, dict], None] = save_result,
+    clock: Callable[[], float] = time.perf_counter,
+    log_event=None,
 ) -> Dict[str, object]:
     summary: Dict[str, object] = {
         "total_chunks": len(chunks),
@@ -44,9 +46,48 @@ def run_extraction(
         "calls_used": 0,
         "stopped_early": False,
         "stop_reason": "",
+        "elapsed_seconds": 0.0,
+        "processed_chunks": 0,
+        "chunks_per_minute": 0.0,
+        "chunk_median_seconds": None,
+        "chunk_p95_seconds": None,
+        "retry_wait_seconds": 0.0,
     }
     fingerprint = ontology.fingerprint()
     failed_in_a_row = 0
+    run_start = clock()
+    chunk_times: List[float] = []
+
+    def finish() -> Dict[str, object]:
+        elapsed = clock() - run_start
+        summary["elapsed_seconds"] = round(elapsed, 3)
+        fresh = summary["valid"] + summary["invalid"] + summary["failed"]
+        summary["processed_chunks"] = fresh
+        if elapsed > 0:
+            summary["chunks_per_minute"] = round(fresh / elapsed * 60, 2)
+        if len(chunk_times) > 0:
+            ordered = sorted(chunk_times)
+            middle = len(ordered) // 2
+            if len(ordered) % 2 == 1:
+                median = ordered[middle]
+            else:
+                median = (ordered[middle - 1] + ordered[middle]) / 2
+            p95_index = max(0, math.ceil(0.95 * len(ordered)) - 1)
+            summary["chunk_median_seconds"] = round(median, 3)
+            summary["chunk_p95_seconds"] = round(ordered[p95_index], 3)
+        return summary
+
+
+    def emit(kind, chunk, **fields):
+        if log_event is None:
+            return
+        event = {"event": kind, "chunk_id": chunk["chunk_id"],
+                "document_id": chunk.get("accession"), "section": chunk.get("item_id"),
+                "form": chunk.get("form"), "start": chunk.get("start"), "end": chunk.get("end"),
+                "model": model_name, "prompt_version": PROMPT_VERSION,
+                "schema_version": SCHEMA_VERSION}
+        event.update(fields)
+        log_event(event)
 
     for chunk in chunks:
         chunk_id = chunk["chunk_id"]
@@ -54,15 +95,17 @@ def run_extraction(
 
         if already_done(results_dir, chunk_id, work_key):
             summary["skipped_done"] = summary["skipped_done"] + 1
+            emit("chunk_final", chunk, status="skipped", result_reused=True,
+                attempts=0, valid_first_try=None, retries=0)
             continue
 
         prompt = build_prompt(chunk, ontology)
-        attempt = 0
+
+
         outcome = "failed"
         problems: List[str] = []
         edges: List[dict] = []
-        raw_text = ""
-        last_error_text = ""
+        
 
         while attempt < limits.max_attempts_per_chunk:
             if summary["calls_used"] >= limits.max_calls:
@@ -94,10 +137,20 @@ def run_extraction(
                 continue
 
             is_valid, problems, edges = validate_extraction(raw_text, chunk, ontology)
+            metrics = dict(getattr(call_model, "last_metrics", {}))
+            metrics.setdefault("latency_ms", round((time.perf_counter() - call_start) * 1000, 3))
+            validation_status = "invalid"
+            if not is_valid:
+                metrics["error_type"] = "validation_failed"
+            if is_valid:
+                validation_status = "valid"
+                last_error_text = ""
+            emit("attempt", chunk, attempt=attempt, status=validation_status,
+                metrics=metrics, problems=problems)
             if is_valid:
                 outcome = "valid"
                 break
-            outcome = "invalid"   # bad answer: try again at once, no wait
+
 
         record = {
             "status": outcome,
@@ -115,7 +168,15 @@ def run_extraction(
         if outcome == "invalid":
             record["raw_response"] = raw_text
         save(results_dir, chunk_id, work_key, record)
-
+        names = set()
+        for edge in edges:
+            names.add((edge["source_type"], edge["source_name"]))
+            names.add((edge["target_type"], edge["target_name"]))
+        emit("chunk_final", chunk, status=outcome, result_reused=False,
+            attempts=attempt, retries=max(0, attempt - 1),
+            valid_first_try=(outcome == "valid" and attempt == 1),
+            empty=(outcome == "valid" and len(edges) == 0),
+            edges=len(edges), derived_endpoint_entities=len(names))
         if outcome == "valid":
             summary["valid"] = summary["valid"] + 1
             failed_in_a_row = 0
@@ -129,4 +190,4 @@ def run_extraction(
                 summary["stop_reason"] = "too many chunks in a row ran out of attempts"
                 return summary
 
-    return summary
+    return summary 
