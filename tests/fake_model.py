@@ -26,13 +26,17 @@ class FakeModel:
 
 def good_answer(quote: str) -> str:
     """A valid answer for the standard test ontology, quoting `quote`."""
-    relation = {
-        "relation": "DEVELOPS",
-        "source_name": "Acme Corp",
-        "source_type": "Company",
-        "target_name": "Widget Engine",
-        "target_type": "Technology",
-        "evidence_quote": quote,
-        "confidence": 0.9,
+    answer = {
+        "entities": [
+            {"name": "Acme Corp", "type": "Company"},
+            {"name": "Widget Engine", "type": "Technology"},
+        ],
+        "relationships": [{
+            "relation": "DEVELOPS",
+            "source": "Acme Corp",
+            "target": "Widget Engine",
+            "evidence_quote": quote,
+            "confidence": 0.9,
+        }],
     }
-    return json.dumps({"relations": [relation]})
+    return json.dumps(answer)

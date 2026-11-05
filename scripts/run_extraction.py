@@ -31,16 +31,20 @@ class EchoClient:
         quote = " ".join(words[:8])
         if quote == "":
             quote = "placeholder quote"
-        relation = {
-            "relation": "DEVELOPS",
-            "source_name": "Placeholder Company",
-            "source_type": "Company",
-            "target_name": "Placeholder Technology",
-            "target_type": "Technology",
-            "evidence_quote": quote,
-            "confidence": 0.0,
+        answer = {
+            "entities": [
+                {"name": "Placeholder Company", "type": "Company"},
+                {"name": "Placeholder Technology", "type": "Technology"},
+            ],
+            "relationships": [{
+                "relation": "DEVELOPS",
+                "source": "Placeholder Company",
+                "target": "Placeholder Technology",
+                "evidence_quote": quote,
+                "confidence": 0.0,
+            }],
         }
-        return json.dumps({"relations": [relation]})
+        return json.dumps(answer)
 
 
 def load_chunks(chunks_path: Path, max_chunks: int) -> list:

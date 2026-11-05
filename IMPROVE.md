@@ -2,6 +2,25 @@
 
 Running list of changes, newest first.
 
+## 2026-11-05 - extraction schema: entities + relationships (main)
+
+- `app/extraction/prompt.py` (p2), `app/extraction/schema.py` (s2),
+  `app/extraction/gemini_client.py`: the extraction answer is now
+  `{"entities": [...], "relationships": [...]}` instead of relations only.
+  Entities with no relationship are kept, so later phases can use mentions.
+  Relationships reference entities by name. The validator rejects unknown
+  references, duplicate entity names, types outside the ontology, relation and
+  type combinations the ontology does not allow, quotes missing from the chunk,
+  and unexpected keys (year or amount are not in the ontology, so they are
+  rejected, never silently stored).
+- `app/extraction/ledger.py`: saved results are indented, readable JSON.
+- `app/extraction/runner.py`: the saved record carries the entities list; the
+  final chunk event reports `entities` instead of derived endpoint names.
+- Old s1/p1 results stay on disk but are never reused: schema and prompt
+  versions are part of the work key, so the next run re-extracts under s2/p2.
+- Suite after this commit: 117 passed (Linux, Python 3.10), including new
+  migration and validation tests. Windows and a live Gemini run are untested.
+
 ## 2026-10-31 - failing tests and import bugs (branch real-filing-html-tests, commit 2)
 
 - `app/corpus/chunking.py`, `scripts/build_chunks.py`: fixed stale import

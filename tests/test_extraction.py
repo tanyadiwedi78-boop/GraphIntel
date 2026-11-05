@@ -52,30 +52,36 @@ def quick_limits(**changes):
 
 def test_valid_answer_gets_edge_fields_from_our_chunk(ontology):
     chunk = make_chunk(1)
-    ok, problems, edges = validate_extraction(good_answer(QUOTE), chunk, ontology)
+    ok, problems, edges, entities = validate_extraction(good_answer(QUOTE), chunk, ontology)
     assert ok, problems
     assert edges[0]["source_chunk_id"] == "chunk-1"
     assert edges[0]["filing_accession"] == "0000000000-26-000001"
     assert edges[0]["form_type"] == "10-K"
     assert edges[0]["period"] == "2026-01-31"
+    # Endpoint types come from the entities list, not from the relationship.
+    assert edges[0]["source_type"] == "Company"
+    assert edges[0]["target_type"] == "Technology"
+    assert entities == [{"name": "Acme Corp", "type": "Company"},
+                        {"name": "Widget Engine", "type": "Technology"}]
 
 
 def test_quote_spacing_differences_are_allowed(ontology):
-    ok, _, _ = validate_extraction(good_answer("Acme develops  the Widget Engine"), make_chunk(1), ontology)
+    ok = validate_extraction(good_answer("Acme develops  the Widget Engine"), make_chunk(1), ontology)[0]
     assert ok
 
 
 def test_quote_not_in_chunk_is_invalid(ontology):
-    ok, problems, edges = validate_extraction(good_answer("Acme invented time travel"), make_chunk(1), ontology)
+    ok, problems, edges, entities = validate_extraction(good_answer("Acme invented time travel"), make_chunk(1), ontology)
     assert not ok
     assert edges == []
+    assert entities == []
     assert "evidence_quote does not appear" in problems[0]
 
 
 def test_relation_outside_ontology_is_invalid(ontology):
     bad = json.loads(good_answer(QUOTE))
-    bad["relations"][0]["target_type"] = "Company"   # DEVELOPS must end at Technology
-    ok, problems, _ = validate_extraction(json.dumps(bad), make_chunk(1), ontology)
+    bad["entities"][1]["type"] = "Company"   # DEVELOPS must end at Technology
+    ok, problems, _, _ = validate_extraction(json.dumps(bad), make_chunk(1), ontology)
     assert not ok
     assert "not in the ontology" in problems[0]
 
@@ -87,13 +93,63 @@ def test_not_json_and_wrong_shape_are_invalid(ontology):
 
 def test_confidence_must_be_between_0_and_1(ontology):
     bad = json.loads(good_answer(QUOTE))
-    bad["relations"][0]["confidence"] = 7
+    bad["relationships"][0]["confidence"] = 7
     assert not validate_extraction(json.dumps(bad), make_chunk(1), ontology)[0]
 
 
-def test_empty_relation_list_is_valid(ontology):
-    ok, _, edges = validate_extraction('{"relations": []}', make_chunk(1), ontology)
-    assert ok and edges == []
+def test_empty_lists_are_valid(ontology):
+    ok, _, edges, entities = validate_extraction('{"entities": [], "relationships": []}', make_chunk(1), ontology)
+    assert ok and edges == [] and entities == []
+
+
+def test_standalone_entity_without_relationship_is_kept(ontology):
+    answer = '{"entities": [{"name": "Acme Corp", "type": "Company"}], "relationships": []}'
+    ok, problems, edges, entities = validate_extraction(answer, make_chunk(1), ontology)
+    assert ok, problems
+    assert edges == []
+    assert entities == [{"name": "Acme Corp", "type": "Company"}]
+
+
+def test_relationship_must_reference_listed_entities(ontology):
+    bad = json.loads(good_answer(QUOTE))
+    bad["relationships"][0]["source"] = "Ghost Corp"
+    ok, problems, _, _ = validate_extraction(json.dumps(bad), make_chunk(1), ontology)
+    assert not ok
+    assert "not in the entities list" in problems[0]
+
+
+def test_duplicate_entity_names_are_invalid(ontology):
+    bad = json.loads(good_answer(QUOTE))
+    bad["entities"].append({"name": "Acme Corp", "type": "Company"})
+    ok, problems, _, _ = validate_extraction(json.dumps(bad), make_chunk(1), ontology)
+    assert not ok
+    assert "duplicate entity name" in problems[0]
+
+
+def test_entity_type_outside_ontology_is_invalid(ontology):
+    bad = json.loads(good_answer(QUOTE))
+    bad["entities"][0]["type"] = "Planet"
+    ok, problems, _, _ = validate_extraction(json.dumps(bad), make_chunk(1), ontology)
+    assert not ok
+    assert "not an allowed entity type" in problems[0]
+
+
+def test_extra_keys_are_rejected_not_silently_kept(ontology):
+    """A relationship carrying year or amount is not in the ontology: reject, never keep quietly."""
+    bad = json.loads(good_answer(QUOTE))
+    bad["relationships"][0]["year"] = 2017
+    bad["relationships"][0]["amount"] = "13.7 billion USD"
+    ok, problems, _, _ = validate_extraction(json.dumps(bad), make_chunk(1), ontology)
+    assert not ok
+    assert "unexpected keys" in problems[0]
+
+
+def test_missing_relationship_key_is_invalid(ontology):
+    bad = json.loads(good_answer(QUOTE))
+    del bad["relationships"][0]["evidence_quote"]
+    ok, problems, _, _ = validate_extraction(json.dumps(bad), make_chunk(1), ontology)
+    assert not ok
+    assert "missing evidence_quote" in problems[0]
 
 
 # ---------- errors and waits ----------
@@ -277,6 +333,35 @@ def test_failed_and_invalid_results_are_tried_again_next_run(ontology, tmp_path)
     assert again["valid"] == 2
     assert again["skipped_done"] == 0
     assert len(second.calls) == 2
+
+
+def test_old_schema_results_are_not_reused_and_stay_on_disk(ontology, tmp_path):
+    chunk = make_chunk(1)
+    old_key = make_work_key(chunk, ontology.fingerprint(), "s1", "p1", "m")
+    save_result(str(tmp_path), "chunk-1", old_key, {"status": "valid", "edges": [{"relation": "DEVELOPS"}]})
+    old_file = result_path(str(tmp_path), "chunk-1", old_key)
+
+    sleep, _ = no_sleep_recorder()
+    model = FakeModel([good_answer(QUOTE)])
+    summary = run_extraction([chunk], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert len(model.calls) == 1          # re-extracted under the new schema
+    assert summary["skipped_done"] == 0
+    assert summary["valid"] == 1
+    assert os.path.exists(old_file)       # the old file is left alone
+
+
+def test_saved_record_is_readable_json_with_entities(ontology, tmp_path):
+    sleep, _ = no_sleep_recorder()
+    run_extraction([make_chunk(1)], FakeModel([good_answer(QUOTE)]), ontology, "m", str(tmp_path), quick_limits(), sleep)
+    files = os.listdir(tmp_path)
+    assert len(files) == 1
+    raw = open(os.path.join(tmp_path, files[0])).read()
+    assert chr(10) in raw                 # indented, not one long line
+    saved = json.loads(raw)
+    assert saved["status"] == "valid"
+    assert saved["entities"] == [{"name": "Acme Corp", "type": "Company"},
+                                 {"name": "Widget Engine", "type": "Technology"}]
+    assert saved["edges"][0]["relation"] == "DEVELOPS"
 
 
 def test_echo_results_are_never_reused_by_a_real_model(ontology, tmp_path):

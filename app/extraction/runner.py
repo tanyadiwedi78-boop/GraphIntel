@@ -105,6 +105,7 @@ def run_extraction(
         outcome = "failed"
         problems: List[str] = []
         edges: List[dict] = []
+        entities: List[dict] = []
         raw_text = ""
         last_error_text = ""
         chunk_start = clock()
@@ -158,7 +159,7 @@ def run_extraction(
                 summary["retry_wait_seconds"] = round(summary["retry_wait_seconds"] + wait, 3)
                 continue
 
-            is_valid, problems, edges = validate_extraction(raw_text, chunk, ontology)
+            is_valid, problems, edges, entities = validate_extraction(raw_text, chunk, ontology)
             metrics = dict(getattr(call_model, "last_metrics", {}))
             metrics.setdefault("latency_ms", round((clock() - call_start) * 1000, 3))
             validation_status = "invalid"
@@ -187,21 +188,18 @@ def run_extraction(
             "problems": problems,
             "last_error": last_error_text,
             "edges": edges,
+            "entities": entities,
         }
         if outcome == "invalid":
             record["raw_response"] = raw_text
         save(results_dir, chunk_id, work_key, record)
-        names = set()
-        for edge in edges:
-            names.add((edge["source_type"], edge["source_name"]))
-            names.add((edge["target_type"], edge["target_name"]))
         chunk_seconds = clock() - chunk_start
         chunk_times.append(chunk_seconds)
         emit("chunk_final", chunk, status=outcome, result_reused=False,
             attempts=attempt, retries=max(0, attempt - 1),
             valid_first_try=(outcome == "valid" and attempt == 1),
             empty=(outcome == "valid" and len(edges) == 0),
-            edges=len(edges), derived_endpoint_entities=len(names),
+            edges=len(edges), entities=len(entities),
             chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
         if outcome == "valid":
             summary["valid"] = summary["valid"] + 1

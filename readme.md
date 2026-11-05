@@ -33,6 +33,14 @@ See [IMPROVE.md](IMPROVE.md) for the running list of changes.
 `app/extraction/` holds the resumable extraction job: one saved result per chunk,
 finished chunks are skipped on the next run, a call cap stops runaway spend.
 
+The model answers with two lists: `entities` (name and type, including entities
+that have no relationship) and `relationships` (relation, source, target, evidence
+quote, confidence; source and target must name entities from its own list). The
+answer is checked against a strict JSON schema at the API, then again locally
+against the ontology, the entity references and the chunk text before it is saved.
+Saved results are readable, indented JSON; the chunk and filing provenance is added
+by our code, never by the model.
+
 ```
 python scripts/run_extraction.py --max-chunks 5                 # offline echo placeholder
 python scripts/run_extraction.py --provider gemini --gemini-assume-free \
@@ -47,6 +55,8 @@ python scripts/run_extraction.py --provider gemini --gemini-assume-free \
 - The script prints run time, chunks per minute, median and p95 chunk time, and total retry wait.
 - Delivery is at least once: a crash after the model answered but before the save repeats that one call.
 - The evidence-quote check proves the quote appears in the chunk. It does not prove the fact is true.
+- Results from the old relations-only schema stay on disk but are never reused:
+  the schema and prompt versions are part of each result's save key.
 - Not done yet: entity resolution, Neo4j writes, precision/recall on a labeled set, benchmark table.
 
 ```

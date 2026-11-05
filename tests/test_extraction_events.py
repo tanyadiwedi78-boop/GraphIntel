@@ -31,7 +31,7 @@ def test_invalid_then_valid_attempts_and_final(tmp_path):
     assert events[-1]["retries"] == 1
     assert events[-1]["valid_first_try"] is False
     assert events[-1]["edges"] == 1
-    assert events[-1]["derived_endpoint_entities"] == 2
+    assert events[-1]["entities"] == 2
     assert events[-1]["document_id"] == "0000000000-26-000001"
     assert events[-1]["section"] is None
 
@@ -79,8 +79,8 @@ def test_strict_validator_rejects_nonfinite_confidence_and_unhashable_types():
     from app.extraction.schema import validate_extraction
     ontology = load_ontology("configs/ontology.json")
     bad = json.loads(good_answer(QUOTE))
-    bad["relations"][0]["confidence"] = float("nan")
+    bad["relationships"][0]["confidence"] = float("nan")
     assert not validate_extraction(json.dumps(bad), make_chunk(1), ontology)[0]
     bad = json.loads(good_answer(QUOTE))
-    bad["relations"][0]["relation"] = []
+    bad["relationships"][0]["relation"] = []
     assert not validate_extraction(json.dumps(bad), make_chunk(1), ontology)[0]

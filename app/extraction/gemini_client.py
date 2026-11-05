@@ -32,22 +32,36 @@ def extraction_json_schema(ontology):
     """JSON schema for generation, using only fields the API documents.
 
     Strictness lives in our validator (schema.py). This schema is the first
-    fence, not the last one.
+    fence, not the last one: the provider schema cannot express "source must
+    name an entity in the list" or "the quote must appear in the chunk", so
+    those checks stay local.
     """
-    fields = {
-        "relation": {"type": "string", "enum": sorted(ontology.relations.keys())},
-        "source_name": {"type": "string"},
-        "source_type": {"type": "string", "enum": list(ontology.entity_types)},
-        "target_name": {"type": "string"},
-        "target_type": {"type": "string", "enum": list(ontology.entity_types)},
-        "evidence_quote": {"type": "string"},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    entity = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "type": {"type": "string", "enum": list(ontology.entity_types)},
+        },
+        "required": ["name", "type"],
     }
-    relation = {"type": "object", "properties": fields, "required": list(fields.keys())}
+    relationship = {
+        "type": "object",
+        "properties": {
+            "relation": {"type": "string", "enum": sorted(ontology.relations.keys())},
+            "source": {"type": "string"},
+            "target": {"type": "string"},
+            "evidence_quote": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+        "required": ["relation", "source", "target", "evidence_quote", "confidence"],
+    }
     return {
         "type": "object",
-        "properties": {"relations": {"type": "array", "items": relation}},
-        "required": ["relations"],
+        "properties": {
+            "entities": {"type": "array", "items": entity},
+            "relationships": {"type": "array", "items": relationship},
+        },
+        "required": ["entities", "relationships"],
     }
 
 
