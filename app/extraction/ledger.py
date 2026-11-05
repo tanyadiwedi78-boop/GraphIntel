@@ -40,7 +40,7 @@ def save_result(results_dir: str, chunk_id: str, work_key: str, record: dict) ->
     final_path = result_path(results_dir, chunk_id, work_key)
     temp_path = final_path + ".tmp"
     with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(record, f)
+        json.dump(record, f, indent=2)
         f.flush()
         os.fsync(f.fileno())
     os.replace(temp_path, final_path)

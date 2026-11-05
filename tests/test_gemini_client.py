@@ -14,7 +14,7 @@ from app.graph.ontology import load_ontology
 FAKE_KEY = "fake-key-for-tests"
 
 
-def gemini_response(text='{"relations": []}', status="completed"):
+def gemini_response(text='{"entities": [], "relationships": []}', status="completed"):
     return {
         "status": status,
         "steps": [{"type": "model_output",
@@ -66,17 +66,20 @@ def client(server, monkeypatch):
 def test_schema_required_enums_and_documented_fields_only():
     ontology = load_ontology("configs/ontology.json")
     schema = extraction_json_schema(ontology)
-    relation = schema["properties"]["relations"]["items"]
-    assert schema["required"] == ["relations"]
-    assert relation["properties"]["relation"]["enum"] == sorted(ontology.relations)
-    assert relation["properties"]["confidence"]["maximum"] == 1
-    assert set(relation["required"]) == set(relation["properties"].keys())
+    assert schema["required"] == ["entities", "relationships"]
+    entity = schema["properties"]["entities"]["items"]
+    relationship = schema["properties"]["relationships"]["items"]
+    assert entity["properties"]["type"]["enum"] == list(ontology.entity_types)
+    assert set(entity["required"]) == set(entity["properties"].keys())
+    assert relationship["properties"]["relation"]["enum"] == sorted(ontology.relations)
+    assert relationship["properties"]["confidence"]["maximum"] == 1
+    assert set(relationship["required"]) == set(relationship["properties"].keys())
 
 
 def test_constructor_makes_no_call_and_request_carries_schema(client, server):
     url, state = server
     assert state["requests"] == []
-    assert client("test prompt") == '{"relations": []}'
+    assert client("test prompt") == '{"entities": [], "relationships": []}'
     path, headers, request = state["requests"][0]
     sent = {k.lower(): v for k, v in headers.items()}
     assert sent["x-goog-api-key"] == FAKE_KEY
