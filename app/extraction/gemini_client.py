@@ -52,13 +52,7 @@ def extraction_json_schema(ontology):
 
 
 class MinuteLimiter:
-    """Proactive pacing for ONE process: wait before sending so the chosen
-    per-minute limits hold.
-
-    Tracks request starts and estimated input tokens in a rolling 60-second
-    window. It cannot see other apps, other machines or earlier runs, and it
-    does not track per-day quotas.
-    """
+    
 
     def __init__(self, max_requests_per_minute, max_tokens_per_minute,
                  sleep_func=time.sleep, now_func=time.monotonic):
@@ -71,10 +65,6 @@ class MinuteLimiter:
         self.events = []  # (timestamp, estimated input tokens)
 
     def estimate_input_tokens(self, prompt):
-        # Approximate guess only: 2 characters per token is a rough heuristic,
-        # not a guaranteed bound (dense JSON or non-English text can tokenize
-        # worse). A 429 is still possible; the retry policy handles that.
-        # Measured tokens are logged after each real response.
         return max(1, len(prompt) // 2)
 
     def wait_for_slot(self, estimated_tokens):

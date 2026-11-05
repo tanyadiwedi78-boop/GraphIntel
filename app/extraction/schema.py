@@ -60,7 +60,7 @@ def validate_extraction(raw_text: str, chunk: dict, ontology: Ontology) -> Tuple
 
         if not ontology.allows(item["relation"], item["source_type"], item["target_type"]):
 
-        quote = item["evidence_quote"]
+            quote = item["evidence_quote"]
         if isinstance(quote, str) and quote.strip() != "":
             if squash_spaces(quote) not in chunk_text:
                 problems.append(f"{label}: evidence_quote does not appear in the chunk")
