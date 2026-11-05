@@ -112,16 +112,9 @@ def validate_extraction(raw_text: str, chunk: dict, ontology: Ontology) -> Tuple
                 f"{label}: {source_type} -{relation}-> {target_type} is not in the ontology"
             )
 
-<<<<<<< HEAD
-            quote = item["evidence_quote"]
-        if isinstance(quote, str) and quote.strip() != "":
-            if squash_spaces(quote) not in chunk_text:
-                problems.append(f"{label}: evidence_quote does not appear in the chunk")
-=======
         quote = item["evidence_quote"]
         if squash_spaces(quote) not in chunk_text:
             problems.append(f"{label}: evidence_quote does not appear in the chunk")
->>>>>>> 6a7897f27694b77c8356d82ed1769bb2ddd5d8ac
 
         if len(problems) == before:
             edge: Dict[str, object] = {
