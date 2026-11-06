@@ -6,9 +6,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from app.extraction import gemini_client
-from app.extraction.errors import ProviderError
-from app.extraction.gemini_client import GeminiClient, extraction_json_schema
+from app.extraction import client as gemini_client
+from app.extraction.client import GeminiClient, ProviderError, extraction_json_schema
 from app.graph.ontology import load_ontology
 
 FAKE_KEY = "fake-key-for-tests"
@@ -220,15 +219,12 @@ def test_unfinished_generation_is_rejected(client, server):
     assert client.last_metrics["error_type"] == "output_limit"
 
 
-def test_missing_key_and_echo_identity_refused(monkeypatch):
+def test_missing_key_is_refused_without_leaking(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     ontology = load_ontology("configs/ontology.json")
     with pytest.raises(ValueError) as caught:
         GeminiClient(ontology)
     assert FAKE_KEY not in str(caught.value)
-    monkeypatch.setenv("GEMINI_API_KEY", FAKE_KEY)
-    with pytest.raises(ValueError):
-        GeminiClient(ontology, model_id="echo-placeholder")
 
 
 def test_recipe_changes_with_model_and_generation_limit(client):
@@ -239,13 +235,12 @@ def test_recipe_changes_with_model_and_generation_limit(client):
                                max_requests_per_minute=10, max_tokens_per_minute=1000)
     assert client.model_name != other_model.model_name
     assert client.model_name != other_limit.model_name
-    assert "echo-placeholder" not in client.model_name
     assert FAKE_KEY not in client.model_name
 
 
 def test_adapter_runner_and_jsonl_connected(client, tmp_path):
     from app.extraction.runner import RunLimits, run_extraction
-    from app.extraction.events import JsonlEvents
+    from app.extraction.runner import JsonlEvents
     from tests.test_extraction import make_chunk
     path = tmp_path / "events.jsonl"
     summary = run_extraction([make_chunk(1)], client, load_ontology("configs/ontology.json"),

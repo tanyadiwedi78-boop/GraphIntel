@@ -6,11 +6,10 @@ import os
 
 import pytest
 
-from app.extraction.errors import ProviderError, backoff_seconds, classify_status, RETRY_LATER, STOP_RUN
-from app.extraction.ledger import already_done, make_work_key, result_path, save_result
-from app.extraction.prompt import PROMPT_VERSION, SCHEMA_VERSION
-from app.extraction.runner import RunLimits, run_extraction
-from app.extraction.schema import validate_extraction
+from app.extraction.client import ProviderError, backoff_seconds, classify_status, RETRY_LATER, STOP_RUN
+from app.extraction.runner import (PROMPT_VERSION, SCHEMA_VERSION, RunLimits, already_done,
+                                   load_result, make_work_key, result_path, run_extraction, save_result)
+from app.extraction.validate import validate_extraction
 from app.graph.ontology import load_ontology
 from tests.fake_model import FakeModel, good_answer
 
@@ -43,24 +42,23 @@ def no_sleep_recorder():
 
 def quick_limits(**changes):
     values = dict(max_calls=100, max_attempts_per_chunk=3, base_wait_seconds=1.0,
-                max_wait_seconds=60.0, jitter_fraction=0.0, stop_after_failed_chunks=5)
+                  max_wait_seconds=60.0, jitter_fraction=0.0, stop_after_failed_chunks=5)
     values.update(changes)
     return RunLimits(**values)
 
 
 # ---------- validation: provenance, not truth ----------
 
-def test_valid_answer_gets_edge_fields_from_our_chunk(ontology):
-    chunk = make_chunk(1)
-    ok, problems, edges, entities = validate_extraction(good_answer(QUOTE), chunk, ontology)
+def test_valid_relationships_keep_the_validated_model_shape(ontology):
+    ok, problems, relationships, entities = validate_extraction(good_answer(QUOTE), make_chunk(1), ontology)
     assert ok, problems
-    assert edges[0]["source_chunk_id"] == "chunk-1"
-    assert edges[0]["filing_accession"] == "0000000000-26-000001"
-    assert edges[0]["form_type"] == "10-K"
-    assert edges[0]["period"] == "2026-01-31"
-    # Endpoint types come from the entities list, not from the relationship.
-    assert edges[0]["source_type"] == "Company"
-    assert edges[0]["target_type"] == "Technology"
+    assert relationships == [{
+        "relation": "DEVELOPS",
+        "source": "Acme Corp",
+        "target": "Widget Engine",
+        "evidence_quote": QUOTE,
+        "confidence": 0.9,
+    }]
     assert entities == [{"name": "Acme Corp", "type": "Company"},
                         {"name": "Widget Engine", "type": "Technology"}]
 
@@ -71,9 +69,9 @@ def test_quote_spacing_differences_are_allowed(ontology):
 
 
 def test_quote_not_in_chunk_is_invalid(ontology):
-    ok, problems, edges, entities = validate_extraction(good_answer("Acme invented time travel"), make_chunk(1), ontology)
+    ok, problems, relationships, entities = validate_extraction(good_answer("Acme invented time travel"), make_chunk(1), ontology)
     assert not ok
-    assert edges == []
+    assert relationships == []
     assert entities == []
     assert "evidence_quote does not appear" in problems[0]
 
@@ -98,15 +96,15 @@ def test_confidence_must_be_between_0_and_1(ontology):
 
 
 def test_empty_lists_are_valid(ontology):
-    ok, _, edges, entities = validate_extraction('{"entities": [], "relationships": []}', make_chunk(1), ontology)
-    assert ok and edges == [] and entities == []
+    ok, _, relationships, entities = validate_extraction('{"entities": [], "relationships": []}', make_chunk(1), ontology)
+    assert ok and relationships == [] and entities == []
 
 
 def test_standalone_entity_without_relationship_is_kept(ontology):
     answer = '{"entities": [{"name": "Acme Corp", "type": "Company"}], "relationships": []}'
-    ok, problems, edges, entities = validate_extraction(answer, make_chunk(1), ontology)
+    ok, problems, relationships, entities = validate_extraction(answer, make_chunk(1), ontology)
     assert ok, problems
-    assert edges == []
+    assert relationships == []
     assert entities == [{"name": "Acme Corp", "type": "Company"}]
 
 
@@ -300,6 +298,7 @@ def test_changing_any_part_of_the_recipe_changes_the_key(ontology):
 
 
 def test_new_model_name_reruns_the_chunk(ontology, tmp_path):
+    """The model name is part of the recipe key: another model re-extracts."""
     chunks = [make_chunk(1)]
     sleep, _ = no_sleep_recorder()
     run_extraction(chunks, FakeModel([good_answer(QUOTE)]), ontology, "model-a", str(tmp_path), quick_limits(), sleep)
@@ -350,7 +349,7 @@ def test_old_schema_results_are_not_reused_and_stay_on_disk(ontology, tmp_path):
     assert os.path.exists(old_file)       # the old file is left alone
 
 
-def test_saved_record_is_readable_json_with_entities(ontology, tmp_path):
+def test_saved_record_is_readable_json_with_provenance_once(ontology, tmp_path):
     sleep, _ = no_sleep_recorder()
     run_extraction([make_chunk(1)], FakeModel([good_answer(QUOTE)]), ontology, "m", str(tmp_path), quick_limits(), sleep)
     files = os.listdir(tmp_path)
@@ -359,22 +358,18 @@ def test_saved_record_is_readable_json_with_entities(ontology, tmp_path):
     assert chr(10) in raw                 # indented, not one long line
     saved = json.loads(raw)
     assert saved["status"] == "valid"
+    assert saved["schema_version"] == SCHEMA_VERSION
+    # Provenance lives once on the record, not copied into every relationship.
+    assert saved["filing_accession"] == "0000000000-26-000001"
+    assert saved["form_type"] == "10-K"
+    assert saved["period"] == "2026-01-31"
     assert saved["entities"] == [{"name": "Acme Corp", "type": "Company"},
                                  {"name": "Widget Engine", "type": "Technology"}]
-    assert saved["edges"][0]["relation"] == "DEVELOPS"
-
-
-def test_echo_results_are_never_reused_by_a_real_model(ontology, tmp_path):
-    """A result saved by the offline placeholder is not skipped for a real model.
-
-    The model name is part of the recipe key, so switching from the echo
-    client to a real model re-extracts instead of trusting placeholder output.
-    """
-    chunks = [make_chunk(1)]
-    sleep, _ = no_sleep_recorder()
-    run_extraction(chunks, FakeModel([good_answer(QUOTE)]), ontology, "echo-placeholder", str(tmp_path), quick_limits(), sleep)
-    real = FakeModel([good_answer(QUOTE)])
-    summary = run_extraction(chunks, real, ontology, "qwen-local", str(tmp_path), quick_limits(), sleep)
-    assert len(real.calls) == 1
-    assert summary["skipped_done"] == 0
-    assert summary["valid"] == 1
+    assert saved["relationships"] == [{
+        "relation": "DEVELOPS",
+        "source": "Acme Corp",
+        "target": "Widget Engine",
+        "evidence_quote": QUOTE,
+        "confidence": 0.9,
+    }]
+    assert "edges" not in saved

@@ -1,23 +1,68 @@
+"""Talk to the Gemini API: one prompt in, JSON text out, with cost gates and pacing."""
+
 from __future__ import annotations
 
 import hashlib
 import json
 import math
 import os
+import random
 import socket
 import time
+from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-
-from app.extraction.errors import ProviderError
 
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
 KEY_ENV_VAR = "GEMINI_API_KEY"
 
+RETRY_LATER = "retry_later"   # 429, 408, 5xx: wait, then try again
+STOP_RUN = "stop_run"         # 400, 401, 402, 403 and similar: fix the setup first
 
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+
+class ProviderError(Exception):
+    """One failed model call."""
+
+    def __init__(self, status_code: int, message: str = "", retry_after_seconds: Optional[float] = None):
+        super().__init__(f"provider error {status_code}: {message}")
+        self.status_code = status_code
+        self.message = message
+        self.retry_after_seconds = retry_after_seconds
+
+
+def classify_status(status_code: int) -> str:
+    if status_code == 429 or status_code == 408:
+        return RETRY_LATER
+    if status_code >= 500:
+        return RETRY_LATER
+    return STOP_RUN
+
+
+def backoff_seconds(failed_attempt_number: int, base_seconds: float, cap_seconds: float) -> float:
+    seconds = base_seconds
+    count = 1
+    while count < failed_attempt_number:
+        seconds = seconds * 2
+        count = count + 1
+    if seconds > cap_seconds:
+        seconds = cap_seconds
+    return seconds
+
+
+def wait_before_retry(
+    failed_attempt_number: int,
+    error: ProviderError,
+    base_seconds: float,
+    cap_seconds: float,
+    jitter_fraction: float,
+) -> float:
+    seconds = backoff_seconds(failed_attempt_number, base_seconds, cap_seconds)
+    if error.retry_after_seconds is not None:
+        if error.retry_after_seconds > seconds:
+            seconds = error.retry_after_seconds
+    if jitter_fraction > 0:
+        seconds = seconds + seconds * jitter_fraction * random.random()
+    return seconds
 
 
 def number_or_none(value):
@@ -31,7 +76,7 @@ def number_or_none(value):
 def extraction_json_schema(ontology):
     """JSON schema for generation, using only fields the API documents.
 
-    Strictness lives in our validator (schema.py). This schema is the first
+    Strictness lives in our validator (validate.py). This schema is the first
     fence, not the last one: the provider schema cannot express "source must
     name an entity in the list" or "the quote must appear in the chunk", so
     those checks stay local.
@@ -66,7 +111,7 @@ def extraction_json_schema(ontology):
 
 
 class MinuteLimiter:
-    
+    """Stay under the account's per-minute request and token limits."""
 
     def __init__(self, max_requests_per_minute, max_tokens_per_minute,
                  sleep_func=time.sleep, now_func=time.monotonic):
@@ -99,8 +144,13 @@ class MinuteLimiter:
             waited = waited + 1
 
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class GeminiClient:
-    
+    """Callable client: client(prompt) returns the model's JSON text."""
 
     def __init__(self, ontology, model_id="gemini-3.8-flash", timeout_seconds=120,
                  max_output_tokens=1024, assume_free=False,
@@ -110,10 +160,9 @@ class GeminiClient:
         if api_key == "":
             raise ValueError(
                 KEY_ENV_VAR + " is not set. Create a key in Google AI Studio, then set it "
-                "as an environment variable. Never paste it into chat or code."
-            )
-        if not model_id.strip() or model_id == "echo-placeholder":
-            raise ValueError("model_id must name a real Gemini model, not the echo client")
+                "as an environment variable. Never paste it into chat or code.")
+        if not model_id.strip():
+            raise ValueError("model_id must name a real Gemini model")
         if timeout_seconds <= 0 or max_output_tokens <= 0:
             raise ValueError("timeout and max_output_tokens must be positive")
         if assume_free and (max_requests_per_minute is None or max_tokens_per_minute is None):
@@ -128,7 +177,7 @@ class GeminiClient:
         self.assume_free = assume_free
         if max_requests_per_minute is not None and max_tokens_per_minute is not None:
             self.limiter = MinuteLimiter(max_requests_per_minute, max_tokens_per_minute,
-                                        sleep_func, now_func)
+                                         sleep_func, now_func)
         else:
             self.limiter = None
         recipe = json.dumps([model_id, self.schema, max_output_tokens, "gemini-interactions-v1"],
@@ -157,16 +206,16 @@ class GeminiClient:
 
     def __call__(self, prompt):
         self.last_metrics = {"provider": "gemini", "model_id": self.model_id,
-                            "prompt_tokens": None, "completion_tokens": None,
-                            "thought_tokens": None, "cached_tokens": None,
-                            "output_tokens_per_sec_end_to_end": None,
-                            "cost_basis": self.cost_mode(),
-                            "estimated_cost_usd": None,  # no verified prices: unknown, never fake $0
-                            "error_type": None}
+                             "prompt_tokens": None, "completion_tokens": None,
+                             "thought_tokens": None, "cached_tokens": None,
+                             "output_tokens_per_sec_end_to_end": None,
+                             "cost_basis": self.cost_mode(),
+                             "estimated_cost_usd": None,  # no verified prices: unknown, never fake $0
+                             "error_type": None}
         self.last_metrics["paced_wait_seconds"] = 0.0
         try:
             self.check_call_allowed()
-        except ProviderError as error:
+        except ProviderError:
             self.last_metrics["error_type"] = "cost_blocked"
             raise
         estimated_input = self.limiter.estimate_input_tokens(prompt)
@@ -178,12 +227,12 @@ class GeminiClient:
             "response_format": {"type": "text", "mime_type": "application/json",
                                 "schema": self.schema},
             "generation_config": {"seed": 0, "thinking_level": "minimal",
-                                "max_output_tokens": self.max_output_tokens},
+                                  "max_output_tokens": self.max_output_tokens},
             "store": False,
         }
         request = Request(ENDPOINT, data=json.dumps(payload).encode("utf-8"),
-                        headers={"Content-Type": "application/json",
-                                "x-goog-api-key": self.api_key}, method="POST")
+                          headers={"Content-Type": "application/json",
+                                   "x-goog-api-key": self.api_key}, method="POST")
         start = time.perf_counter()
         try:
             try:
@@ -200,10 +249,9 @@ class GeminiClient:
                         pass
                 # Do not put arbitrary server bodies into logs or exception messages.
                 raise ProviderError(error.code, "Gemini API HTTP failure", wait) from None
-            except (URLError, TimeoutError, socket.timeout) as error:
+            except (URLError, TimeoutError, socket.timeout):
                 self.last_metrics["error_type"] = "transport_or_timeout"
                 raise ProviderError(503, "Gemini API unavailable or request timed out") from None
-            data = None
             try:
                 data = json.loads(raw)
             except (json.JSONDecodeError, TypeError):

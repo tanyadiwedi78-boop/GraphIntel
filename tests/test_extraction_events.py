@@ -1,9 +1,8 @@
 """Attempt and final-chunk events, including retries, reuse and zero cap."""
 import json
 
-from app.extraction.errors import ProviderError
-from app.extraction.events import JsonlEvents
-from app.extraction.runner import RunLimits, run_extraction
+from app.extraction.client import ProviderError
+from app.extraction.runner import JsonlEvents, RunLimits, run_extraction
 from app.graph.ontology import load_ontology
 from tests.fake_model import FakeModel, good_answer
 from tests.test_extraction import make_chunk, QUOTE
@@ -30,7 +29,7 @@ def test_invalid_then_valid_attempts_and_final(tmp_path):
     assert events[1]["status"] == "valid"
     assert events[-1]["retries"] == 1
     assert events[-1]["valid_first_try"] is False
-    assert events[-1]["edges"] == 1
+    assert events[-1]["relationships"] == 1
     assert events[-1]["entities"] == 2
     assert events[-1]["document_id"] == "0000000000-26-000001"
     assert events[-1]["section"] is None
@@ -44,7 +43,7 @@ def test_reuse_emits_no_model_attempt_and_no_new_edge_counts(tmp_path):
     assert events[0]["status"] == "skipped"
     assert events[0]["result_reused"] is True
     assert events[0]["valid_first_try"] is None
-    assert "edges" not in events[0]
+    assert "relationships" not in events[0]
 
 
 def test_zero_cap_logs_stop_without_attempt(tmp_path):
@@ -76,7 +75,7 @@ def test_jsonl_writer_does_not_log_prompts(tmp_path):
 
 
 def test_strict_validator_rejects_nonfinite_confidence_and_unhashable_types():
-    from app.extraction.schema import validate_extraction
+    from app.extraction.validate import validate_extraction
     ontology = load_ontology("configs/ontology.json")
     bad = json.loads(good_answer(QUOTE))
     bad["relationships"][0]["confidence"] = float("nan")

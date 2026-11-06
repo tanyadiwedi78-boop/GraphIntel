@@ -1,5 +1,4 @@
-"""Run the extraction job over the saved chunks.
-"""
+"""Run the extraction job over the saved chunks with the real Gemini API."""
 
 from __future__ import annotations
 
@@ -12,39 +11,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import ConfigError, load_settings
-from app.extraction.events import JsonlEvents
-from app.extraction.runner import RunLimits, run_extraction
+from app.extraction.client import GeminiClient
+from app.extraction.runner import JsonlEvents, RunLimits, run_extraction
 from app.graph.ontology import load_ontology
-
-
-class EchoClient:
-
-    model_name = "echo-placeholder"
-
-    def __call__(self, prompt: str) -> str:
-        marker = "TEXT:\n"
-        if marker in prompt:
-            text = prompt.split(marker, 1)[1]
-        else:
-            text = ""
-        words = text.split()
-        quote = " ".join(words[:8])
-        if quote == "":
-            quote = "placeholder quote"
-        answer = {
-            "entities": [
-                {"name": "Placeholder Company", "type": "Company"},
-                {"name": "Placeholder Technology", "type": "Technology"},
-            ],
-            "relationships": [{
-                "relation": "DEVELOPS",
-                "source": "Placeholder Company",
-                "target": "Placeholder Technology",
-                "evidence_quote": quote,
-                "confidence": 0.0,
-            }],
-        }
-        return json.dumps(answer)
 
 
 def load_chunks(chunks_path: Path, max_chunks: int) -> list:
@@ -61,10 +30,9 @@ def load_chunks(chunks_path: Path, max_chunks: int) -> list:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run extraction over saved chunks.")
+    parser = argparse.ArgumentParser(description="Run extraction over saved chunks with the Gemini API.")
     parser.add_argument("--max-chunks", type=int, default=10, help="how many chunks to read this run (default 10)")
-    parser.add_argument("--provider", choices=["echo", "gemini"], default="echo",
-                        help="echo = offline placeholder (default), gemini = real model, needs GEMINI_API_KEY in the environment")
+    parser.add_argument("--model", default="gemini-3.8-flash", help="Gemini model id (default: gemini-3.8-flash)")
     parser.add_argument("--gemini-assume-free", action="store_true",
                         help="you checked Google AI Studio and this project has NO billing account "
                              "(free tier). The code cannot check that for you. Required for any "
@@ -95,35 +63,33 @@ def main() -> int:
 
     if settings.max_extraction_calls <= 0:
         print("MAX_EXTRACTION_CALLS is 0, so no calls are allowed.")
-        print("Set it to a positive whole number in .env for this run, for example 20 for a first offline try.")
+        print("Set it to a positive whole number in .env for this run, for example 10 for a first pilot.")
         print("0 is the safe default: nothing can be called until you choose a cap.")
         return 1
     limits = RunLimits(max_calls=settings.max_extraction_calls)
 
+    if not args.gemini_assume_free:
+        print("Live Gemini calls stay blocked until you pass --gemini-assume-free.")
+        print("That flag means: you checked Google AI Studio (API keys / Projects page)")
+        print("and this project has NO billing account linked, so it stays on the free tier.")
+        print("The code cannot check that for you. Paid calls are not implemented in this build.")
+        return 1
+    if args.gemini_max_rpm is None or args.gemini_max_tpm is None:
+        print("Live Gemini calls also need --gemini-max-rpm and --gemini-max-tpm:")
+        print("your account's requests-per-minute and input-tokens-per-minute limits,")
+        print("copied from the AI Studio rate limit page. Limits are per project and per")
+        print("model and can change with your tier, so this build invents no numbers.")
+        return 1
+
+    try:
+        client = GeminiClient(ontology, model_id=args.model, assume_free=True,
+                              max_requests_per_minute=args.gemini_max_rpm,
+                              max_tokens_per_minute=args.gemini_max_tpm)
+    except ValueError as error:
+        print(f"Gemini setup problem: {error}")
+        return 1
+
     results_dir = settings.data_dir / "extraction"
-    if args.provider == "gemini":
-        if not args.gemini_assume_free:
-            print("Live Gemini calls stay blocked until you pass --gemini-assume-free.")
-            print("That flag means: you checked Google AI Studio (API keys / Projects page)")
-            print("and this project has NO billing account linked, so it stays on the free tier.")
-            print("The code cannot check that for you. Paid calls are not implemented in this build.")
-            return 1
-        if args.gemini_max_rpm is None or args.gemini_max_tpm is None:
-            print("Live Gemini calls also need --gemini-max-rpm and --gemini-max-tpm:")
-            print("your account's requests-per-minute and input-tokens-per-minute limits,")
-            print("copied from the AI Studio rate limit page. Limits are per project and per")
-            print("model and can change with your tier, so this build invents no numbers.")
-            return 1
-        from app.extraction.gemini_client import GeminiClient
-        try:
-            client = GeminiClient(ontology, assume_free=True,
-                                  max_requests_per_minute=args.gemini_max_rpm,
-                                  max_tokens_per_minute=args.gemini_max_tpm)
-        except ValueError as error:
-            print(f"Gemini setup problem: {error}")
-            return 1
-    else:
-        client = EchoClient()
     run_id = uuid.uuid4().hex
     log_path = settings.data_dir / "extraction_logs" / (run_id + ".jsonl")
     events = JsonlEvents(log_path, run_id)
@@ -146,11 +112,8 @@ def main() -> int:
         print(f"Stopped early: {summary['stop_reason']}")
     print(f"Results saved in {results_dir}")
     print("Run the same command again: finished chunks are skipped, nothing is processed twice.")
-    if args.provider == "gemini":
-        print("Cost this run: unknown (" + client.cost_mode() + "). Measured token usage is in the event log.")
-        print("Reminder: real model answers still need hand-checking against the source text before you trust them.")
-    else:
-        print("Reminder: the echo client is a placeholder. It proves save/validate/resume, not extraction quality.")
+    print("Cost this run: unknown (" + client.cost_mode() + "). Measured token usage is in the event log.")
+    print("Reminder: real model answers still need hand-checking against the source text before you trust them.")
     return 0
 
 

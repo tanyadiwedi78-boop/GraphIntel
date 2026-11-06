@@ -1,3 +1,5 @@
+"""CLI wiring for the Gemini-only extraction script. No network, no real API key.
+"""
 import json
 import os
 import subprocess
@@ -5,6 +7,8 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+GOOD_FLAGS = ["--gemini-assume-free", "--gemini-max-rpm", "100", "--gemini-max-tpm", "100000"]
 
 
 def write_chunks(data_dir, count):
@@ -31,62 +35,44 @@ def run_script(data_dir, extra_args=None, extra_env=None):
     env = dict(os.environ)
     env["DATA_DIR"] = str(data_dir)
     env["MAX_EXTRACTION_CALLS"] = "100"
+    env.pop("GEMINI_API_KEY", None)   # tests never see a real key
     if extra_env is not None:
         env.update(extra_env)
     return subprocess.run(args, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
 
 
-def count_results(data_dir):
-    results_dir = data_dir / "extraction"
-    if not results_dir.exists():
-        return 0
-    names = []
-    for name in os.listdir(results_dir):
-        if name.endswith(".json"):
-            names.append(name)
-    return len(names)
-
-
-def test_first_run_extracts_and_second_run_skips(tmp_path):
-    write_chunks(tmp_path, 4)
-    first = run_script(tmp_path)
-    assert first.returncode == 0, first.stderr
-    assert "New valid results:     4" in first.stdout
-    assert count_results(tmp_path) == 4
-
-    second = run_script(tmp_path)
-    assert second.returncode == 0, second.stderr
-    assert "Already done, skipped: 4" in second.stdout
-    assert "New valid results:     0" in second.stdout
-    assert count_results(tmp_path) == 4
-
-
 def test_missing_chunks_file_explains_what_to_do(tmp_path):
-    result = run_script(tmp_path)
+    result = run_script(tmp_path, GOOD_FLAGS, {"GEMINI_API_KEY": "fake-key"})
     assert result.returncode == 1
     assert "build_chunks" in result.stdout
 
 
-def test_max_chunks_limits_how_many_are_read(tmp_path):
-    write_chunks(tmp_path, 6)
-    result = run_script(tmp_path, ["--max-chunks", "2"])
-    assert result.returncode == 0, result.stderr
-    assert "Chunks read:           2" in result.stdout
-    assert count_results(tmp_path) == 2
-
-
-def test_max_extraction_calls_from_env_caps_the_run(tmp_path):
-    write_chunks(tmp_path, 5)
-    result = run_script(tmp_path, ["--max-chunks", "5"], {"MAX_EXTRACTION_CALLS": "2"})
-    assert result.returncode == 0, result.stderr
-    assert "Model calls used:      2" in result.stdout
-    assert "Stopped early: call cap reached" in result.stdout
-    assert count_results(tmp_path) == 2
-
-
-def test_zero_call_cap_refuses_to_run_and_saves_nothing(tmp_path):
+def test_zero_call_cap_refuses_to_run(tmp_path):
     write_chunks(tmp_path, 3)
-    result = run_script(tmp_path, None, {"MAX_EXTRACTION_CALLS": "0"})
+    result = run_script(tmp_path, GOOD_FLAGS, {"MAX_EXTRACTION_CALLS": "0", "GEMINI_API_KEY": "fake-key"})
     assert result.returncode == 1
     assert "no calls are allowed" in result.stdout
-    assert count_results(tmp_path) == 0
+
+
+def test_live_calls_need_the_assume_free_confirmation(tmp_path):
+    write_chunks(tmp_path, 3)
+    flags = ["--gemini-max-rpm", "100", "--gemini-max-tpm", "100000"]
+    result = run_script(tmp_path, flags, {"GEMINI_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "--gemini-assume-free" in result.stdout
+
+
+def test_live_calls_need_explicit_rate_limits(tmp_path):
+    write_chunks(tmp_path, 3)
+    result = run_script(tmp_path, ["--gemini-assume-free"], {"GEMINI_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "--gemini-max-rpm" in result.stdout
+
+
+def test_missing_api_key_is_a_setup_problem_not_a_crash(tmp_path):
+    write_chunks(tmp_path, 3)
+    result = run_script(tmp_path, GOOD_FLAGS)
+    assert result.returncode == 1
+    assert "Gemini setup problem" in result.stdout
+    assert "GEMINI_API_KEY" in result.stdout
+    assert "Traceback" not in result.stderr

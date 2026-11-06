@@ -14,7 +14,7 @@ def squash_spaces(text: str) -> str:
 
 
 def validate_extraction(raw_text: str, chunk: dict, ontology: Ontology) -> Tuple[bool, List[str], List[dict], List[dict]]:
-    """Return (is_valid, problems, edges, entities). `edges` and `entities` are empty unless valid."""
+    """Return (is_valid, problems, relationships, entities). Lists are empty unless valid."""
     problems: List[str] = []
 
     try:
@@ -59,7 +59,7 @@ def validate_extraction(raw_text: str, chunk: dict, ontology: Ontology) -> Tuple
         entities.append(entity)
 
     chunk_text = squash_spaces(chunk["text"])
-    edges: List[dict] = []
+    relationships: List[dict] = []
     position = 0
     for item in data["relationships"]:
         position = position + 1
@@ -117,22 +117,16 @@ def validate_extraction(raw_text: str, chunk: dict, ontology: Ontology) -> Tuple
             problems.append(f"{label}: evidence_quote does not appear in the chunk")
 
         if len(problems) == before:
-            edge: Dict[str, object] = {
+            # Keep the validated relationship in exactly the model's shape.
+            # Types come from the entities list; provenance lives on the record.
+            relationships.append({
                 "relation": relation,
-                "source_name": source,
-                "source_type": source_type,
-                "target_name": target,
-                "target_type": target_type,
+                "source": source,
+                "target": target,
                 "evidence_quote": quote,
                 "confidence": confidence,
-            }
-            # These come from OUR chunk record, never from the model.
-            edge["source_chunk_id"] = chunk["chunk_id"]
-            edge["filing_accession"] = chunk["accession"]
-            edge["form_type"] = chunk["form"]
-            edge["period"] = chunk["period"]
-            edges.append(edge)
+            })
 
     if len(problems) > 0:
         return False, problems, [], []
-    return True, [], edges, entities
+    return True, [], relationships, entities

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import List, Union
 
-from app.extraction.errors import ProviderError
+from app.extraction.client import ProviderError
 
 
 class FakeModel:

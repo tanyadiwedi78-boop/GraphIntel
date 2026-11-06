@@ -1,7 +1,7 @@
 """Run and chunk timing: fake clock, no network, no real waiting."""
 import pytest
 
-from app.extraction.errors import ProviderError
+from app.extraction.client import ProviderError
 from app.extraction.runner import RunLimits, run_extraction
 from app.graph.ontology import load_ontology
 from tests.fake_model import FakeModel, good_answer
