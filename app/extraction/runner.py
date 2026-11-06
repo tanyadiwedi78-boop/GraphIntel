@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from app.extraction.client import ProviderError, RETRY_LATER, classify_status, wait_before_retry
+from app.extraction.client import ChunkFailedError, ProviderError, RETRY_LATER, classify_status, wait_before_retry
 from app.extraction.validate import validate_extraction
 from app.graph.ontology import Ontology
 
@@ -208,6 +208,17 @@ def run_extraction(
             call_start = clock()
             try:
                 raw_text = call_model(prompt)
+            except ChunkFailedError as error:
+                # One chunk cannot complete (for example the answer was cut off at
+                # the output token limit). Retrying the identical request would
+                # fail the same way, so fail the chunk and continue the run.
+                last_error_text = str(error)
+                outcome = "failed"
+                metrics = dict(getattr(call_model, "last_metrics", {}))
+                metrics.setdefault("latency_ms", round((clock() - call_start) * 1000, 3))
+                metrics.setdefault("error_type", "chunk_failed")
+                emit("attempt", chunk, attempt=attempt, status="failed", metrics=metrics)
+                break
             except ProviderError as error:
                 last_error_text = str(error)
                 outcome = "failed"

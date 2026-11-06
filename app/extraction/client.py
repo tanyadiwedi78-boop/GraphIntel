@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import math
 import os
 import random
-import socket
 import time
 from typing import Optional
 from urllib.error import HTTPError, URLError
@@ -28,6 +28,15 @@ class ProviderError(Exception):
         self.status_code = status_code
         self.message = message
         self.retry_after_seconds = retry_after_seconds
+
+
+class ChunkFailedError(ProviderError):
+    """This chunk's answer cannot succeed by retrying the same request.
+
+    The runner fails this one chunk and moves on: it does not burn the
+    remaining attempts on an identical request, and it does not stop the
+    whole run for a problem that belongs to one chunk.
+    """
 
 
 def classify_status(status_code: int) -> str:
@@ -249,7 +258,9 @@ class GeminiClient:
                         pass
                 # Do not put arbitrary server bodies into logs or exception messages.
                 raise ProviderError(error.code, "Gemini API HTTP failure", wait) from None
-            except (URLError, TimeoutError, socket.timeout):
+            except (OSError, http.client.HTTPException):
+                # URLError, TimeoutError and dropped connections are all OSError;
+                # a half-read response raises http.client.IncompleteRead.
                 self.last_metrics["error_type"] = "transport_or_timeout"
                 raise ProviderError(503, "Gemini API unavailable or request timed out") from None
             try:
@@ -259,10 +270,20 @@ class GeminiClient:
             if not isinstance(data, dict):
                 self.last_metrics["error_type"] = "response_envelope"
                 raise ProviderError(502, "invalid API response envelope") from None
-            if data.get("status") == "requires_continuation":
-                self.last_metrics["error_type"] = "output_limit"
-                raise ProviderError(400, "generation token limit reached; review limits")
-            if data.get("status") != "completed" or not isinstance(data.get("steps"), list):
+            status = data.get("status")
+            if status == "incomplete":
+                # Official meaning: completed but cut off, e.g. hitting max_tokens.
+                self.last_metrics["error_type"] = "output_cut_off"
+                raise ChunkFailedError(
+                    400, "answer cut off at the output token limit; raise "
+                    "max_output_tokens or use a smaller chunk")
+            if status == "requires_continuation":
+                # Official meaning: needs another request with continuation_token,
+                # which this build does not support. Not an output-limit signal.
+                self.last_metrics["error_type"] = "needs_continuation"
+                raise ChunkFailedError(
+                    400, "provider asked for a continuation step this build does not support")
+            if status != "completed" or not isinstance(data.get("steps"), list):
                 self.last_metrics["error_type"] = "response_envelope"
                 raise ProviderError(502, "invalid API response envelope") from None
             text = None

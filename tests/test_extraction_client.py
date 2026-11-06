@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from app.extraction import client as gemini_client
-from app.extraction.client import GeminiClient, ProviderError, extraction_json_schema
+from app.extraction.client import ChunkFailedError, GeminiClient, ProviderError, extraction_json_schema
 from app.graph.ontology import load_ontology
 
 FAKE_KEY = "fake-key-for-tests"
@@ -210,13 +210,53 @@ def test_bad_envelope_is_not_a_valid_empty_answer(client, server):
     assert client.last_metrics["error_type"] == "response_envelope"
 
 
-def test_unfinished_generation_is_rejected(client, server):
+def test_cut_off_answer_fails_the_chunk(client, server):
+    # Official docs: hitting max_tokens returns status "incomplete".
+    url, state = server
+    state["body"] = gemini_response(status="incomplete")
+    with pytest.raises(ChunkFailedError) as caught:
+        client("p")
+    assert "output token limit" in str(caught.value)
+    assert client.last_metrics["error_type"] == "output_cut_off"
+
+
+def test_continuation_request_fails_the_chunk(client, server):
+    # Official docs: "requires_continuation" needs another request with a
+    # continuation_token; it is not an output-limit signal.
     url, state = server
     state["body"] = gemini_response(status="requires_continuation")
+    with pytest.raises(ChunkFailedError) as caught:
+        client("p")
+    assert "continuation" in str(caught.value)
+    assert client.last_metrics["error_type"] == "needs_continuation"
+
+
+def test_dropped_connection_is_a_retryable_transport_error(client):
+    import http.client as http_client
+    def drop(request, timeout=None):
+        raise http_client.RemoteDisconnected("dropped")
+    client.opener.open = drop
     with pytest.raises(ProviderError) as caught:
         client("p")
-    assert caught.value.status_code == 400
-    assert client.last_metrics["error_type"] == "output_limit"
+    assert caught.value.status_code == 503
+    assert client.last_metrics["error_type"] == "transport_or_timeout"
+
+
+def test_cut_off_chunk_fails_but_the_run_continues(client, server, tmp_path):
+    from app.extraction.runner import RunLimits, run_extraction
+    from tests.test_extraction import make_chunk
+    url, state = server
+    state["body"] = gemini_response(status="incomplete")
+    ontology = load_ontology("configs/ontology.json")
+    summary = run_extraction([make_chunk(1), make_chunk(2)], client, ontology,
+                             client.model_name, str(tmp_path / "out"),
+                             RunLimits(max_calls=10))
+    # Each chunk got exactly one attempt: no retry with an identical request,
+    # and the first chunk's failure did not stop the run.
+    assert len(state["requests"]) == 2
+    assert summary["failed"] == 2
+    assert summary["calls_used"] == 2
+    assert summary["stopped_early"] is False
 
 
 def test_missing_key_is_refused_without_leaking(monkeypatch):
