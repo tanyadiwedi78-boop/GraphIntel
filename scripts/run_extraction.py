@@ -67,10 +67,10 @@ def main() -> int:
     parser.add_argument("--gemini-max-tpm", type=int, default=None,
                         help="input tokens per minute limit from YOUR AI Studio rate limit page")
     parser.add_argument("--max-documents", type=int, default=1,
-                        help="how many documents this run may touch (default 1). The default keeps "
-                             "the first runs a measured one-document pilot: read the per-document "
-                             "totals from summarize_extraction.py, then rerun with a bigger number. "
-                             "This is the per-document cost budget from the architecture notes.")
+                        help="how many documents this run may touch (default 1). A scope limiter, "
+                             "not a cost budget: the default keeps the first runs a measured "
+                             "one-document pilot. Read the per-document totals from "
+                             "summarize_extraction.py, then rerun with a bigger number.")
     parser.add_argument("--give-up-after-runs", type=int, default=3,
                         help="skip a chunk after this many separate runs where its own content "
                              "failed or stayed invalid (default 3). Rate-limit, quota and network "
@@ -192,9 +192,9 @@ def main() -> int:
     print(f"Results saved in {results_dir}")
     if wanted_ids is None:
         print(f"Documents this run: {len(scoped_documents)} of {len(all_documents)} in the loaded chunks "
-              f"(budget guard: --max-documents {args.max_documents}).")
+              f"(scope limiter: --max-documents {args.max_documents}).")
         if len(scoped_documents) < len(all_documents):
-            print("Budget guard: read the measured per-document totals from summarize_extraction.py,")
+            print("Pilot scope: read the measured per-document totals from summarize_extraction.py,")
             print("then rerun with --max-documents and a bigger number to widen the scope.")
     unfinished = summary["total_chunks"] - summary["skipped_done"] - summary["valid"]
     if unfinished > 0:

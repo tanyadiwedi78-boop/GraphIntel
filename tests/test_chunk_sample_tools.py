@@ -679,3 +679,48 @@ def test_summarize_reports_per_document_measured_totals(tmp_path):
     assert "doc-b: calls=1 valid=1" in result.stdout
     assert "prompt-tokens=220" in result.stdout
     assert "Cost per document in dollars: unknown" in result.stdout
+
+
+def test_pilot_scope_and_full_scope_coverage_under_the_cap(tmp_path):
+    # The pilot (default scope: 1 document) finishes document 1 and never
+    # touches the others. The full-corpus route (--max-documents covering all
+    # documents) advances through every document under the 3-call cap:
+    # repeated identical runs visit the unfinished chunks in order until all
+    # documents are valid.
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    module = load_run_extraction_module()
+    chunks = []
+    for doc in range(3):
+        accession = "0000000000-26-00000" + str(doc + 1)
+        for number in range(2):
+            chunk = make_runner_chunk("doc" + str(doc) + "-chunk-" + str(number), quote)
+            chunk["accession"] = accession
+            chunks.append(chunk)
+    results_dir = str(tmp_path / "extraction")
+    limits = RunLimits(max_calls=3)
+
+    # Pilot scope: document 1 only, done in one run; the rest are untouched.
+    pilot = module.limit_documents(chunks, 1)
+    assert len(pilot) == 2
+    first = run_extraction(pilot, FakeModel([good_answer(quote), good_answer(quote)]),
+                           ontology, "fake-model", results_dir, limits, sleep=no_sleep)
+    assert first["valid"] == 2
+    again = run_extraction(pilot, FakeModel([]), ontology, "fake-model", results_dir, limits,
+                           sleep=no_sleep)
+    assert again["skipped_done"] == 2 and again["calls_used"] == 0
+    assert len(os.listdir(results_dir)) == 2  # only document 1 has records
+
+    # Full-corpus route: repeated capped runs advance through documents 2
+    # and 3 until all six chunks are valid - no document is stranded.
+    full = module.limit_documents(chunks, 99)
+    assert len(full) == 6
+    run_extraction(full, FakeModel([good_answer(quote)] * 3), ontology, "fake-model",
+                   results_dir, limits, sleep=no_sleep)
+    run_extraction(full, FakeModel([good_answer(quote)] * 3), ontology, "fake-model",
+                   results_dir, limits, sleep=no_sleep)
+    final = run_extraction(full, FakeModel([]), ontology, "fake-model", results_dir, limits,
+                           sleep=no_sleep)
+    assert final["skipped_done"] == 6
+    assert final["valid"] == 0 and final["calls_used"] == 0
+    assert len(os.listdir(results_dir)) == 6
