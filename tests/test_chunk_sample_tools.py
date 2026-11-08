@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from app.extraction.runner import RunLimits, run_extraction
+from app.extraction.client import ProviderError
 from app.graph.ontology import load_ontology
 from tests.fake_model import FakeModel, good_answer
 
@@ -478,3 +479,84 @@ def test_score_excludes_non_valid_results(tmp_path):
     assert result.returncode == 1
     assert 'status "invalid", not valid' in result.stdout
     assert "Nothing could be scored" in result.stdout
+
+
+def test_transient_failures_never_give_up_and_stay_pending(tmp_path):
+    # A chunk failing with retry-later provider errors (429: rate limit or
+    # quota) must NEVER be given up: that is the run's problem, not the
+    # chunk's. Four separate failing runs, zero give-ups, chunk still pending.
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    chunk = make_runner_chunk("chunk-1", quote)
+    results_dir = str(tmp_path / "extraction")
+    limits = RunLimits(max_calls=3)
+    for round_number in range(4):
+        model = FakeModel([ProviderError(429), ProviderError(429), ProviderError(429)])
+        summary = run_extraction([chunk], model, ontology, "fake-model", results_dir, limits,
+                                 sleep=no_sleep)
+        assert summary["failed"] == 1
+        assert summary["gave_up"] == 0
+        assert summary["calls_used"] == 3  # in-run retries count against the cap
+    from app.extraction.runner import make_work_key
+    key = make_work_key(chunk, ontology.fingerprint(), "s3", "p2-rules-v1", "fake-model")
+    with open(os.path.join(results_dir, "chunk-1__" + key + ".json"), "r", encoding="utf-8") as f:
+        saved = json.load(f)
+    assert saved["failure_kind"] == "transient"
+    assert saved["runs"] == 0  # transient failures never count toward give-up
+
+
+def test_retry_given_up_flag_reincludes_chunks_without_deleting_records(tmp_path):
+    from app.extraction.client import ChunkFailedError
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    chunk = make_runner_chunk("chunk-1", quote)
+    results_dir = str(tmp_path / "extraction")
+    limits = RunLimits(max_calls=3)
+    for round_number in range(3):
+        model = FakeModel([ChunkFailedError(400, "cut off")])
+        run_extraction([chunk], model, ontology, "fake-model", results_dir, limits, sleep=no_sleep)
+    # Given up now: a normal run makes no calls.
+    quiet = run_extraction([chunk], FakeModel([]), ontology, "fake-model", results_dir, limits,
+                           sleep=no_sleep)
+    assert quiet["gave_up"] == 1 and quiet["calls_used"] == 0
+    # Recovery is a flag, not a deletion: the record stays on disk and the chunk succeeds.
+    retry_limits = RunLimits(max_calls=3, retry_given_up=True)
+    model = FakeModel([good_answer(quote)])
+    retried = run_extraction([chunk], model, ontology, "fake-model", results_dir, retry_limits,
+                             sleep=no_sleep)
+    assert retried["valid"] == 1 and retried["gave_up"] == 0
+    assert len(os.listdir(results_dir)) == 1  # same record file, now valid
+
+
+def test_give_up_after_runs_is_configurable(tmp_path):
+    from app.extraction.client import ChunkFailedError
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    chunk = make_runner_chunk("chunk-1", quote)
+    results_dir = str(tmp_path / "extraction")
+    strict = RunLimits(max_calls=3, give_up_after_runs=1)
+    model = FakeModel([ChunkFailedError(400, "cut off")])
+    run_extraction([chunk], model, ontology, "fake-model", results_dir, strict, sleep=no_sleep)
+    second = run_extraction([chunk], FakeModel([]), ontology, "fake-model", results_dir, strict,
+                            sleep=no_sleep)
+    assert second["gave_up"] == 1
+
+
+def test_record_from_an_older_recipe_is_ignored_not_counted(tmp_path):
+    # A failed record under a different model/prompt/schema has a different
+    # work key: it must not count toward give-up or block a fresh attempt.
+    from app.extraction.client import ChunkFailedError
+    from app.extraction.runner import make_work_key
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    chunk = make_runner_chunk("chunk-1", quote)
+    results_dir = str(tmp_path / "extraction")
+    os.makedirs(results_dir)
+    old_key = make_work_key(chunk, ontology.fingerprint(), "s2-old", "p1-old", "old-model")
+    with open(os.path.join(results_dir, "chunk-1__" + old_key + ".json"), "w", encoding="utf-8") as f:
+        json.dump({"status": "failed", "runs": 99, "chunk_id": "chunk-1", "work_key": old_key}, f)
+    limits = RunLimits(max_calls=3)
+    model = FakeModel([good_answer(quote)])
+    summary = run_extraction([chunk], model, ontology, "fake-model", results_dir, limits, sleep=no_sleep)
+    assert len(model.calls) == 1  # fresh attempt under the current recipe
+    assert summary["valid"] == 1 and summary["gave_up"] == 0

@@ -142,25 +142,35 @@ class RunLimits:
     max_wait_seconds: float = 60.0
     jitter_fraction: float = 0.1
     stop_after_failed_chunks: int = 5
+    give_up_after_runs: int = 3          # CONTENT failures in this many separate runs: skip the chunk
+    retry_given_up: bool = False         # True: include given-up chunks again (records are kept, never deleted)
 
 
-# A chunk that keeps failing (or staying invalid) in this many SEPARATE runs is
-# skipped from then on, so a repeated whole-corpus command always advances and a
-# broken chunk cannot burn the call cap forever. Its saved record stays on disk;
-# delete that record to try the chunk again from zero.
-GIVE_UP_AFTER_RUNS = 3
+def give_up(saved: Optional[dict], give_up_after_runs: int) -> bool:
+    """True when a chunk's own content keeps failing across enough separate runs.
 
-
-def give_up(saved: Optional[dict]) -> bool:
-    """True when a saved failed/invalid record has had enough separate runs."""
+    Only CONTENT failures count: the answer was cut off or never validated, so
+    retrying the identical request cannot help. Transient failures (rate limit,
+    quota, network, provider 5xx) never count: they are the run's problem, not
+    the chunk's, and the chunk must stay pending for a later run.
+    """
     if saved is None:
         return False
-    if saved.get("status") not in ("failed", "invalid"):
+    status = saved.get("status")
+    if status == "invalid":
+        kind = "content"  # an invalid answer is always a content problem
+    elif status == "failed":
+        kind = saved.get("failure_kind")
+        if kind is None:
+            kind = "content"  # records from before failure_kind existed: old code only saved content failures and exhausted-retry failures; the next attempt under this code re-tags them, so at most stale runs are miscounted
+        if kind != "content":
+            return False
+    else:
         return False
     runs = saved.get("runs")
     if not isinstance(runs, int) or isinstance(runs, bool):
         runs = 1  # records from before this counter existed count as one run
-    return runs >= GIVE_UP_AFTER_RUNS
+    return runs >= give_up_after_runs
 
 
 def run_extraction(
@@ -237,17 +247,18 @@ def run_extraction(
             emit("chunk_final", chunk, status="skipped", result_reused=True,
                 attempts=0, valid_first_try=None, retries=0)
             continue
-        if give_up(saved_record):
+        if not limits.retry_given_up and give_up(saved_record, limits.give_up_after_runs):
             summary["gave_up"] = summary["gave_up"] + 1
             emit("chunk_final", chunk, status="gave_up", result_reused=True,
                 attempts=0, valid_first_try=None, retries=0,
-                reason="failed or invalid in " + str(GIVE_UP_AFTER_RUNS) + " separate runs")
+                reason="content failed or invalid in " + str(limits.give_up_after_runs) + " separate runs")
             continue
 
         prompt = build_prompt(chunk, ontology)
 
         attempt = 0
         outcome = "failed"
+        failure_kind = "content"
         problems: List[str] = []
         relationships: List[dict] = []
         entities: List[dict] = []
@@ -289,6 +300,7 @@ def run_extraction(
                 metrics.setdefault("latency_ms", round((clock() - call_start) * 1000, 3))
                 metrics.setdefault("error_type", "http_" + str(error.status_code))
                 emit("attempt", chunk, attempt=attempt, status="failed", metrics=metrics)
+                failure_kind = "transient"  # rate limit, quota, network, 5xx: the run's problem, not the chunk's
                 if classify_status(error.status_code) != RETRY_LATER:
                     summary["stopped_early"] = True
                     summary["stop_reason"] = "setup problem, not retried: " + last_error_text
@@ -333,16 +345,20 @@ def run_extraction(
 
         # One record per chunk and recipe: run metadata once, then the validated
         # entities and relationships in the model's own shape.
-        runs_count = 1
+        previous_runs = 0
         if saved_record is not None:
-            previous_runs = saved_record.get("runs")
-            if isinstance(previous_runs, int) and not isinstance(previous_runs, bool) and previous_runs >= 1:
-                runs_count = previous_runs + 1
+            saved_runs = saved_record.get("runs")
+            if isinstance(saved_runs, int) and not isinstance(saved_runs, bool):
+                previous_runs = max(0, saved_runs)
             else:
-                runs_count = 2
+                previous_runs = 1  # record from before the counter existed
+        runs_count = previous_runs + 1
+        if outcome == "valid" or (outcome == "failed" and failure_kind == "transient"):
+            runs_count = previous_runs  # only separate runs of CONTENT failure count toward give-up
         record = {
             "status": outcome,
             "runs": runs_count,
+            "failure_kind": failure_kind,
             "chunk_id": chunk_id,
             "work_key": work_key,
             "model": model_name,

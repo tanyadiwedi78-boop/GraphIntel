@@ -47,6 +47,12 @@ def main() -> int:
                         help="requests per minute limit from YOUR AI Studio rate limit page")
     parser.add_argument("--gemini-max-tpm", type=int, default=None,
                         help="input tokens per minute limit from YOUR AI Studio rate limit page")
+    parser.add_argument("--give-up-after-runs", type=int, default=3,
+                        help="skip a chunk after this many separate runs where its own content "
+                             "failed or stayed invalid (default 3). Rate-limit, quota and network "
+                             "failures never count toward this.")
+    parser.add_argument("--retry-given-up", action="store_true",
+                        help="include given-up chunks again this run; their saved records stay on disk")
     args = parser.parse_args()
 
     try:
@@ -96,7 +102,9 @@ def main() -> int:
         print("Set it to a positive whole number in .env for this run, for example 10 for a first pilot.")
         print("0 is the safe default: nothing can be called until you choose a cap.")
         return 1
-    limits = RunLimits(max_calls=settings.max_extraction_calls)
+    limits = RunLimits(max_calls=settings.max_extraction_calls,
+                       give_up_after_runs=args.give_up_after_runs,
+                       retry_given_up=args.retry_given_up)
 
     if not args.gemini_assume_free:
         print("Live Gemini calls stay blocked until you pass --gemini-assume-free.")
@@ -133,7 +141,7 @@ def main() -> int:
     print(f"New valid results:     {summary['valid']}")
     print(f"Invalid answers:       {summary['invalid']}")
     print(f"Failed chunks:         {summary['failed']}")
-    print(f"Gave up on:            {summary['gave_up']} (failed or invalid in 3 separate runs; delete a chunk's saved record in {results_dir} to try it again)")
+    print(f"Gave up on:            {summary['gave_up']} (own-content failures in 3 separate runs; rerun with --retry-given-up to include them again - records stay on disk)")
     print(f"Model calls used:      {summary['calls_used']}")
     print(f"Run time:              {summary['elapsed_seconds']} s (wall clock: calls, waiting, validation, saving)")
     print(f"Chunks per minute:     {summary['chunks_per_minute']} (fresh chunks only; skipped chunks are not counted)")
@@ -142,6 +150,10 @@ def main() -> int:
     if summary["stopped_early"]:
         print(f"Stopped early: {summary['stop_reason']}")
     print(f"Results saved in {results_dir}")
+    unfinished = summary["total_chunks"] - summary["skipped_done"] - summary["valid"]
+    if unfinished > 0:
+        print(f"NOT fully extracted: {unfinished} of {summary['total_chunks']} loaded chunks are still pending, invalid, failed or given up.")
+        print("Transient failures (rate limit, quota, network) never count toward give-up and stay pending for a later run.")
     print("Run the same command again: finished chunks are skipped, given-up chunks are left alone, nothing is processed twice.")
     print("Cost this run: unknown (" + client.cost_mode() + "). Measured token usage is in the event log.")
     print("Reminder: real model answers still need hand-checking against the source text before you trust them.")
