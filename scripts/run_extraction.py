@@ -33,6 +33,25 @@ def load_chunks(chunks_path: Path, max_chunks: int, wanted_ids=None) -> list:
     return chunks
 
 
+def limit_documents(chunks: list, max_documents: int) -> list:
+    """Keep only the chunks of the first `max_documents` distinct documents.
+
+    Budget the extraction cost per document before running the full corpus:
+    the default scope is one document, so widening the scope is always an
+    explicit choice made after reading measured per-document totals.
+    """
+    seen = []
+    kept = []
+    for chunk in chunks:
+        accession = chunk.get("accession")
+        if accession not in seen:
+            if len(seen) >= max_documents:
+                break
+            seen.append(accession)
+        kept.append(chunk)
+    return kept
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run extraction over saved chunks with the Gemini API.")
     parser.add_argument("--max-chunks", type=int, default=10, help="how many chunks to read this run (default 10)")
@@ -47,6 +66,11 @@ def main() -> int:
                         help="requests per minute limit from YOUR AI Studio rate limit page")
     parser.add_argument("--gemini-max-tpm", type=int, default=None,
                         help="input tokens per minute limit from YOUR AI Studio rate limit page")
+    parser.add_argument("--max-documents", type=int, default=1,
+                        help="how many documents this run may touch (default 1). The default keeps "
+                             "the first runs a measured one-document pilot: read the per-document "
+                             "totals from summarize_extraction.py, then rerun with a bigger number. "
+                             "This is the per-document cost budget from the architecture notes.")
     parser.add_argument("--give-up-after-runs", type=int, default=3,
                         help="skip a chunk after this many separate runs where its own content "
                              "failed or stayed invalid (default 3). Rate-limit, quota and network "
@@ -54,6 +78,10 @@ def main() -> int:
     parser.add_argument("--retry-given-up", action="store_true",
                         help="include given-up chunks again this run; their saved records stay on disk")
     args = parser.parse_args()
+
+    if args.max_documents < 1:
+        print("--max-documents must be at least 1.")
+        return 1
 
     try:
         settings = load_settings()
@@ -78,6 +106,18 @@ def main() -> int:
             return 1
 
     chunks = load_chunks(chunks_path, args.max_chunks, wanted_ids)
+    all_documents = []
+    if wanted_ids is None:
+        for chunk in chunks:
+            accession = chunk.get("accession")
+            if accession not in all_documents:
+                all_documents.append(accession)
+        chunks = limit_documents(chunks, args.max_documents)
+    scoped_documents = []
+    for chunk in chunks:
+        accession = chunk.get("accession")
+        if accession not in scoped_documents:
+            scoped_documents.append(accession)
     if len(chunks) == 0 and wanted_ids is None:
         print(f"{chunks_path} has no chunks.")
         return 1
@@ -150,6 +190,12 @@ def main() -> int:
     if summary["stopped_early"]:
         print(f"Stopped early: {summary['stop_reason']}")
     print(f"Results saved in {results_dir}")
+    if wanted_ids is None:
+        print(f"Documents this run: {len(scoped_documents)} of {len(all_documents)} in the loaded chunks "
+              f"(budget guard: --max-documents {args.max_documents}).")
+        if len(scoped_documents) < len(all_documents):
+            print("Budget guard: read the measured per-document totals from summarize_extraction.py,")
+            print("then rerun with --max-documents and a bigger number to widen the scope.")
     unfinished = summary["total_chunks"] - summary["skipped_done"] - summary["valid"]
     if unfinished > 0:
         print(f"NOT fully extracted: {unfinished} of {summary['total_chunks']} loaded chunks are still pending, invalid, failed or given up.")

@@ -66,6 +66,10 @@ def main() -> int:
     elapsed_total = 0.0
     attempt_count = 0
     cost_basis_seen = set()
+    doc_attempts = {}
+    doc_status = {}
+    doc_seconds = {}
+    doc_tokens = {}
     totals = {"prompt_tokens": 0, "completion_tokens": 0, "thought_tokens": 0, "cached_tokens": 0,
               "prompt_tokens_attempts": 0, "completion_tokens_attempts": 0,
               "thought_tokens_attempts": 0, "cached_tokens_attempts": 0}
@@ -86,6 +90,15 @@ def main() -> int:
                     attempt_count = attempt_count + 1
                     metrics = event.get("metrics", {})
                     add_tokens(totals, metrics)
+                    doc = event.get("document_id")
+                    if isinstance(doc, str) and doc != "":
+                        doc_attempts[doc] = doc_attempts.get(doc, 0) + 1
+                        if doc not in doc_tokens:
+                            doc_tokens[doc] = {"prompt_tokens": 0, "completion_tokens": 0,
+                                               "thought_tokens": 0, "cached_tokens": 0,
+                                               "prompt_tokens_attempts": 0, "completion_tokens_attempts": 0,
+                                               "thought_tokens_attempts": 0, "cached_tokens_attempts": 0}
+                        add_tokens(doc_tokens[doc], metrics)
                     paced = metrics.get("paced_wait_seconds")
                     if isinstance(paced, (int, float)) and not isinstance(paced, bool):
                         paced_wait_total = paced_wait_total + paced
@@ -99,6 +112,15 @@ def main() -> int:
                     seconds = event.get("chunk_seconds")
                     if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
                         chunk_seconds.append(seconds)
+                    doc = event.get("document_id")
+                    if isinstance(doc, str) and doc != "":
+                        if doc not in doc_status:
+                            doc_status[doc] = {}
+                        doc_status[doc][status] = doc_status[doc].get(status, 0) + 1
+                        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+                            if doc not in doc_seconds:
+                                doc_seconds[doc] = []
+                            doc_seconds[doc].append(seconds)
                     waited = event.get("retry_wait_seconds")
                     if isinstance(waited, (int, float)) and not isinstance(waited, bool):
                         retry_wait_total = retry_wait_total + waited
@@ -131,6 +153,25 @@ def main() -> int:
     median, p95 = median_and_p95(chunk_seconds)
     if median is not None:
         print(f"Chunk time median/p95: {median} s / {p95} s")
+    all_docs = []
+    for doc in list(doc_status.keys()) + list(doc_attempts.keys()):
+        if doc not in all_docs:
+            all_docs.append(doc)
+    if len(all_docs) > 0:
+        print("Per-document measured totals (the per-document budget inputs):")
+        for doc in sorted(all_docs):
+            line_text = "  " + doc + ": calls=" + str(doc_attempts.get(doc, 0))
+            for status in sorted(doc_status.get(doc, {}).keys()):
+                line_text = line_text + " " + status + "=" + str(doc_status[doc][status])
+            median, p95 = median_and_p95(doc_seconds.get(doc, []))
+            if median is not None:
+                line_text = line_text + " chunk-time-median=" + str(median) + "s"
+            tokens = doc_tokens.get(doc)
+            if tokens is not None and tokens["prompt_tokens_attempts"] > 0:
+                line_text = line_text + " prompt-tokens=" + str(tokens["prompt_tokens"])
+            print(line_text)
+        print("Cost per document in dollars: unknown until a verified price source exists.")
+        print("The calls, tokens and chunk times above are the measured per-document budget inputs.")
     print(f"Retry backoff wait total: {round(retry_wait_total, 3)} s")
     print(f"Rate-limit pacing wait total: {round(paced_wait_total, 3)} s")
     print("Token usage (provider-reported):")

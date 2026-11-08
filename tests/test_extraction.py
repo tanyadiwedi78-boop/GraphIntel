@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from app.extraction.client import ProviderError, backoff_seconds, classify_status, RETRY_LATER, STOP_RUN
+from app.extraction.client import ChunkFailedError, ProviderError, backoff_seconds, classify_status, RETRY_LATER, STOP_RUN
 from app.extraction.runner import (PROMPT_VERSION, SCHEMA_VERSION, RunLimits, already_done,
                                    load_result, make_work_key, result_path, run_extraction, save_result)
 from app.extraction.validate import validate_extraction
@@ -308,8 +308,12 @@ def test_new_model_name_reruns_the_chunk(ontology, tmp_path):
 
 
 def test_stops_after_too_many_failed_chunks_in_a_row(ontology, tmp_path):
+    # The in-a-row breaker is for CONTENT failures (the chunk's own problem):
+    # each one fails fast and the run moves on until too many fail in a row.
+    # Provider-wide transient failures stop the run immediately instead; that
+    # is covered by test_transient_failures_stop_the_run_before_later_chunks.
     chunks = [make_chunk(1), make_chunk(2), make_chunk(3)]
-    model = FakeModel([ProviderError(503)] * 4)
+    model = FakeModel([ChunkFailedError(400, "cut off"), ChunkFailedError(400, "cut off")])
     sleep, _ = no_sleep_recorder()
     summary = run_extraction(
         chunks, model, ontology, "m", str(tmp_path),
@@ -317,13 +321,30 @@ def test_stops_after_too_many_failed_chunks_in_a_row(ontology, tmp_path):
     )
     assert summary["failed"] == 2
     assert summary["stopped_early"]
-    assert len(model.calls) == 4
+    assert len(model.calls) == 2
+
+
+def test_transient_failures_stop_the_run_before_later_chunks(ontology, tmp_path):
+    # A provider-wide failure (persistent 503) stops the run after the failed
+    # chunk: later chunks are never visited, so the call cap is not burned on
+    # more failures and everything unfinished stays pending.
+    chunks = [make_chunk(1), make_chunk(2), make_chunk(3)]
+    model = FakeModel([ProviderError(503)] * 2)
+    sleep, _ = no_sleep_recorder()
+    summary = run_extraction(
+        chunks, model, ontology, "m", str(tmp_path),
+        quick_limits(max_attempts_per_chunk=2, stop_after_failed_chunks=2), sleep,
+    )
+    assert summary["failed"] == 1
+    assert summary["stopped_early"]
+    assert "provider-side failure" in summary["stop_reason"]
+    assert len(model.calls) == 2
 
 
 def test_failed_and_invalid_results_are_tried_again_next_run(ontology, tmp_path):
     chunks = [make_chunk(1), make_chunk(2)]
     sleep, _ = no_sleep_recorder()
-    first = FakeModel([ProviderError(503), ProviderError(503), ProviderError(503), "bad", "bad", "bad"])
+    first = FakeModel([ChunkFailedError(400, "cut off"), "bad", "bad", "bad"])
     summary = run_extraction(chunks, first, ontology, "m", str(tmp_path), quick_limits(), sleep)
     assert summary["failed"] == 1 and summary["invalid"] == 1
 

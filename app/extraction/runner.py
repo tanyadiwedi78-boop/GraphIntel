@@ -393,6 +393,17 @@ def run_extraction(
         else:
             summary["failed"] = summary["failed"] + 1
             failed_in_a_row = failed_in_a_row + 1
+            if failure_kind == "transient":
+                # A provider-wide failure (rate limit, quota, network, server
+                # error) means later chunks would very likely fail the same
+                # way. Stop now instead of burning the call cap on them. The
+                # chunk's record above is transient, so it stays pending and
+                # rerunning the same command resumes exactly here.
+                summary["stopped_early"] = True
+                summary["stop_reason"] = ("provider-side failure (rate limit, quota, network or server error); "
+                                          "stopped so later chunks are not charged against the call cap. "
+                                          "This chunk stays pending: rerun the same command when the provider recovers.")
+                return finish()
             if failed_in_a_row >= limits.stop_after_failed_chunks:
                 summary["stopped_early"] = True
                 summary["stop_reason"] = "too many chunks in a row ran out of attempts"

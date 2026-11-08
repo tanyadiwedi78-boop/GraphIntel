@@ -560,3 +560,122 @@ def test_record_from_an_older_recipe_is_ignored_not_counted(tmp_path):
     summary = run_extraction([chunk], model, ontology, "fake-model", results_dir, limits, sleep=no_sleep)
     assert len(model.calls) == 1  # fresh attempt under the current recipe
     assert summary["valid"] == 1 and summary["gave_up"] == 0
+
+
+def load_run_extraction_module():
+    spec = importlib.util.spec_from_file_location("run_extraction_script",
+                                                  REPO_ROOT / "scripts" / "run_extraction.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_max_documents_scopes_the_run_to_the_first_documents(tmp_path):
+    write_chunks(tmp_path, three_doc_specs())
+    module = load_run_extraction_module()
+    chunks_path = tmp_path / "chunks" / "chunks.jsonl"
+    chunks = module.load_chunks(chunks_path, 100)
+    one_doc = module.limit_documents(chunks, 1)
+    assert len(one_doc) == 3
+    for chunk in one_doc:
+        assert chunk["accession"] == "0000000000-26-000001"
+    two_docs = module.limit_documents(chunks, 2)
+    assert len(two_docs) == 6
+    all_docs = module.limit_documents(chunks, 99)
+    assert len(all_docs) == 9
+
+
+def test_persistent_server_error_stops_run_before_later_chunks(tmp_path):
+    # A provider-wide failure (persistent 503: network or server) must stop the
+    # run: visiting later chunks would burn the call cap on more failures. The
+    # failed chunk stays pending (transient, runs not counted) and later chunks
+    # are never visited, so no records exist for them at all.
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    chunks = []
+    for number in range(3):
+        chunks.append(make_runner_chunk("chunk-" + str(number + 1), quote))
+    results_dir = str(tmp_path / "extraction")
+    limits = RunLimits(max_calls=10)  # the cap alone would NOT stop this run
+    model = FakeModel([ProviderError(503), ProviderError(503), ProviderError(503)])
+    summary = run_extraction(chunks, model, ontology, "fake-model", results_dir, limits,
+                             sleep=no_sleep)
+    assert summary["calls_used"] == 3  # chunk-1's in-run retries only
+    assert summary["stopped_early"] is True
+    assert "provider-side failure" in summary["stop_reason"]
+    assert len(model.calls) == 3  # chunk-2 and chunk-3 were never visited
+    saved_files = os.listdir(results_dir)
+    assert len(saved_files) == 1  # only chunk-1 has a record: pending, transient
+    with open(os.path.join(results_dir, saved_files[0]), "r", encoding="utf-8") as f:
+        saved = json.load(f)
+    assert saved["failure_kind"] == "transient"
+    assert saved["runs"] == 0
+
+
+def test_auth_error_stops_run_immediately(tmp_path):
+    # 401/403 is a setup problem: one call, immediate stop, nothing written,
+    # later chunks never visited. Everything stays pending for a fixed setup.
+    for status_code in [401, 403]:
+        ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+        quote = "develops the Widget Engine"
+        chunks = []
+        for number in range(3):
+            chunks.append(make_runner_chunk("chunk-" + str(number + 1), quote))
+        results_dir = str(tmp_path / ("extraction" + str(status_code)))
+        limits = RunLimits(max_calls=10)
+        model = FakeModel([ProviderError(status_code)])
+        summary = run_extraction(chunks, model, ontology, "fake-model", results_dir, limits,
+                                 sleep=no_sleep)
+        assert summary["calls_used"] == 1
+        assert summary["stopped_early"] is True
+        assert "setup problem" in summary["stop_reason"]
+        assert len(model.calls) == 1
+
+
+def test_daily_quota_429_stops_the_run_now(tmp_path):
+    # A 429 whose requested wait is longer than the allowed wait (daily quota
+    # exhausted) stops the run at once instead of retrying or moving on.
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    chunks = []
+    for number in range(3):
+        chunks.append(make_runner_chunk("chunk-" + str(number + 1), quote))
+    results_dir = str(tmp_path / "extraction")
+    limits = RunLimits(max_calls=10)
+    model = FakeModel([ProviderError(429, retry_after_seconds=90000)])
+    summary = run_extraction(chunks, model, ontology, "fake-model", results_dir, limits,
+                             sleep=no_sleep)
+    assert summary["calls_used"] == 1
+    assert summary["stopped_early"] is True
+    assert "wait longer than the limit" in summary["stop_reason"]
+    assert len(model.calls) == 1
+
+
+def test_summarize_reports_per_document_measured_totals(tmp_path):
+    logs_dir = tmp_path / "extraction_logs"
+    logs_dir.mkdir(parents=True)
+    run_log = [
+        {"event": "attempt", "chunk_id": "c1", "document_id": "doc-a",
+         "metrics": {"prompt_tokens": 100, "completion_tokens": 10}},
+        {"event": "chunk_final", "chunk_id": "c1", "document_id": "doc-a",
+         "status": "valid", "chunk_seconds": 2.0},
+        {"event": "attempt", "chunk_id": "c2", "document_id": "doc-a",
+         "metrics": {"prompt_tokens": 120, "completion_tokens": 12}},
+        {"event": "chunk_final", "chunk_id": "c2", "document_id": "doc-a",
+         "status": "failed", "chunk_seconds": 4.0},
+        {"event": "attempt", "chunk_id": "c3", "document_id": "doc-b",
+         "metrics": {"prompt_tokens": 200, "completion_tokens": 20}},
+        {"event": "chunk_final", "chunk_id": "c3", "document_id": "doc-b",
+         "status": "valid", "chunk_seconds": 6.0},
+        {"event": "run_final", "summary": {"elapsed_seconds": 12.0}},
+    ]
+    with open(logs_dir / "run1.jsonl", "w", encoding="utf-8") as f:
+        for event in run_log:
+            f.write(json.dumps(event) + "\n")
+    result = run_tool("summarize_extraction.py", tmp_path)
+    assert result.returncode == 0
+    assert "Per-document measured totals" in result.stdout
+    assert "doc-a: calls=2 failed=1 valid=1" in result.stdout
+    assert "doc-b: calls=1 valid=1" in result.stdout
+    assert "prompt-tokens=220" in result.stdout
+    assert "Cost per document in dollars: unknown" in result.stdout
