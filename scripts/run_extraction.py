@@ -16,15 +16,19 @@ from app.extraction.runner import JsonlEvents, RunLimits, run_extraction
 from app.graph.ontology import load_ontology
 
 
-def load_chunks(chunks_path: Path, max_chunks: int) -> list:
+def load_chunks(chunks_path: Path, max_chunks: int, wanted_ids=None) -> list:
     chunks = []
     with open(chunks_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line == "":
                 continue
-            chunks.append(json.loads(line))
-            if len(chunks) >= max_chunks:
+            chunk = json.loads(line)
+            if wanted_ids is not None:
+                if chunk.get("chunk_id") not in wanted_ids:
+                    continue
+            chunks.append(chunk)
+            if wanted_ids is None and len(chunks) >= max_chunks:
                 break
     return chunks
 
@@ -32,6 +36,8 @@ def load_chunks(chunks_path: Path, max_chunks: int) -> list:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run extraction over saved chunks with the Gemini API.")
     parser.add_argument("--max-chunks", type=int, default=10, help="how many chunks to read this run (default 10)")
+    parser.add_argument("--chunk-ids", default=None,
+                        help="comma-separated chunk ids to extract instead of the first --max-chunks chunks")
     parser.add_argument("--model", default="gemini-3.8-flash", help="Gemini model id (default: gemini-3.8-flash)")
     parser.add_argument("--gemini-assume-free", action="store_true",
                         help="you checked Google AI Studio and this project has NO billing account "
@@ -54,10 +60,34 @@ def main() -> int:
         print(f"No chunks at {chunks_path}. Run scripts/build_chunks.py first.")
         return 1
 
-    chunks = load_chunks(chunks_path, args.max_chunks)
-    if len(chunks) == 0:
+    wanted_ids = None
+    if args.chunk_ids is not None:
+        wanted_ids = []
+        for piece in args.chunk_ids.split(","):
+            piece = piece.strip()
+            if piece != "":
+                wanted_ids.append(piece)
+        if len(wanted_ids) == 0:
+            print("--chunk-ids was given but it has no ids in it.")
+            return 1
+
+    chunks = load_chunks(chunks_path, args.max_chunks, wanted_ids)
+    if len(chunks) == 0 and wanted_ids is None:
         print(f"{chunks_path} has no chunks.")
         return 1
+    if wanted_ids is not None:
+        found_ids = []
+        for chunk in chunks:
+            found_ids.append(chunk["chunk_id"])
+        missing = []
+        for wanted in wanted_ids:
+            if wanted not in found_ids:
+                missing.append(wanted)
+        if len(missing) > 0:
+            print(f"These chunk ids are not in {chunks_path}:")
+            for wanted in missing:
+                print("  " + wanted)
+            return 1
 
     ontology = load_ontology(settings.ontology_path)
 
