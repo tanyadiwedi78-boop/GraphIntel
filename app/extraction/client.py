@@ -161,10 +161,10 @@ class NoRedirect(HTTPRedirectHandler):
 class GeminiClient:
     """Callable client: client(prompt) returns the model's JSON text."""
 
-    def __init__(self, ontology, model_id="gemini-3.8-flash", timeout_seconds=120,
-                 max_output_tokens=1024, assume_free=False,
-                 max_requests_per_minute=None, max_tokens_per_minute=None,
-                 sleep_func=time.sleep, now_func=time.monotonic):
+    def __init__(self, ontology, model_id="gemini-3.5-flash-lite", timeout_seconds=120,
+                max_output_tokens=1024, assume_free=False,
+                max_requests_per_minute=None, max_tokens_per_minute=None,
+                sleep_func=time.sleep, now_func=time.monotonic):
         api_key = os.environ.get(KEY_ENV_VAR, "").strip()
         if api_key == "":
             raise ValueError(
@@ -186,7 +186,7 @@ class GeminiClient:
         self.assume_free = assume_free
         if max_requests_per_minute is not None and max_tokens_per_minute is not None:
             self.limiter = MinuteLimiter(max_requests_per_minute, max_tokens_per_minute,
-                                         sleep_func, now_func)
+                                        sleep_func, now_func)
         else:
             self.limiter = None
         recipe = json.dumps([model_id, self.schema, max_output_tokens, "gemini-interactions-v1"],
@@ -215,12 +215,12 @@ class GeminiClient:
 
     def __call__(self, prompt):
         self.last_metrics = {"provider": "gemini", "model_id": self.model_id,
-                             "prompt_tokens": None, "completion_tokens": None,
-                             "thought_tokens": None, "cached_tokens": None,
-                             "output_tokens_per_sec_end_to_end": None,
-                             "cost_basis": self.cost_mode(),
-                             "estimated_cost_usd": None,  # no verified prices: unknown, never fake $0
-                             "error_type": None}
+                            "prompt_tokens": None, "completion_tokens": None,
+                            "thought_tokens": None, "cached_tokens": None,
+                            "output_tokens_per_sec_end_to_end": None,
+                            "cost_basis": self.cost_mode(),
+                            "estimated_cost_usd": None,  # no verified prices: unknown, never fake $0
+                            "error_type": None}
         self.last_metrics["paced_wait_seconds"] = 0.0
         try:
             self.check_call_allowed()
@@ -235,13 +235,13 @@ class GeminiClient:
             "input": prompt,
             "response_format": {"type": "text", "mime_type": "application/json",
                                 "schema": self.schema},
-            "generation_config": {"seed": 0, "thinking_level": "minimal",
-                                  "max_output_tokens": self.max_output_tokens},
+            "generation_config": {"seed": 0, "thinking_level": "low",
+                                "max_output_tokens": self.max_output_tokens},
             "store": False,
         }
         request = Request(ENDPOINT, data=json.dumps(payload).encode("utf-8"),
-                          headers={"Content-Type": "application/json",
-                                   "x-goog-api-key": self.api_key}, method="POST")
+                        headers={"Content-Type": "application/json",
+                                "x-goog-api-key": self.api_key}, method="POST")
         start = time.perf_counter()
         try:
             try:

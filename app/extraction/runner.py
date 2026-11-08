@@ -19,7 +19,7 @@ from app.graph.ontology import Ontology
 # prompt text changes. Both are part of the work key, so old results are never
 # mistaken for results of a new recipe.
 SCHEMA_VERSION = "s3"
-PROMPT_VERSION = "p2"
+PROMPT_VERSION = "p2-rules-v1"
 
 
 def build_prompt(chunk: dict, ontology: Ontology) -> str:
@@ -164,10 +164,10 @@ def run_extraction(
         if log_event is None:
             return
         event = {"event": kind, "chunk_id": chunk["chunk_id"],
-                 "document_id": chunk.get("accession"), "section": chunk.get("item_id"),
-                 "form": chunk.get("form"), "start": chunk.get("start"), "end": chunk.get("end"),
-                 "model": model_name, "prompt_version": PROMPT_VERSION,
-                 "schema_version": SCHEMA_VERSION}
+                "document_id": chunk.get("accession"), "section": chunk.get("item_id"),
+                "form": chunk.get("form"), "start": chunk.get("start"), "end": chunk.get("end"),
+                "model": model_name, "prompt_version": PROMPT_VERSION,
+                "schema_version": SCHEMA_VERSION}
         event.update(fields)
         log_event(event)
 
@@ -178,7 +178,7 @@ def run_extraction(
         if already_done(results_dir, chunk_id, work_key):
             summary["skipped_done"] = summary["skipped_done"] + 1
             emit("chunk_final", chunk, status="skipped", result_reused=True,
-                 attempts=0, valid_first_try=None, retries=0)
+                attempts=0, valid_first_try=None, retries=0)
             continue
 
         prompt = build_prompt(chunk, ontology)
@@ -199,8 +199,8 @@ def run_extraction(
                 summary["stop_reason"] = "call cap reached"
                 chunk_seconds = clock() - chunk_start
                 emit("chunk_final", chunk, status="stopped", result_reused=False,
-                     attempts=attempt, retries=max(0, attempt - 1), reason="call cap reached",
-                     chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
+                    attempts=attempt, retries=max(0, attempt - 1), reason="call cap reached",
+                    chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
                 return finish()
 
             attempt = attempt + 1
@@ -231,8 +231,8 @@ def run_extraction(
                     summary["stop_reason"] = "setup problem, not retried: " + last_error_text
                     chunk_seconds = clock() - chunk_start
                     emit("chunk_final", chunk, status="stopped", attempts=attempt,
-                         retries=attempt - 1, result_reused=False, reason=summary["stop_reason"],
-                         chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
+                        retries=attempt - 1, result_reused=False, reason=summary["stop_reason"],
+                        chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
                     return finish()
                 if attempt >= limits.max_attempts_per_chunk:
                     break
@@ -241,8 +241,8 @@ def run_extraction(
                     summary["stop_reason"] = "provider asked for a wait longer than the limit"
                     chunk_seconds = clock() - chunk_start
                     emit("chunk_final", chunk, status="stopped", attempts=attempt,
-                         retries=attempt - 1, result_reused=False, reason=summary["stop_reason"],
-                         chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
+                        retries=attempt - 1, result_reused=False, reason=summary["stop_reason"],
+                        chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
                     return finish()
                 wait = wait_before_retry(
                     attempt, error, limits.base_wait_seconds, limits.max_wait_seconds, limits.jitter_fraction
@@ -262,7 +262,7 @@ def run_extraction(
                 validation_status = "valid"
                 last_error_text = ""
             emit("attempt", chunk, attempt=attempt, status=validation_status,
-                 metrics=metrics, problems=problems)
+                metrics=metrics, problems=problems)
             if is_valid:
                 outcome = "valid"
                 break
@@ -293,11 +293,11 @@ def run_extraction(
         chunk_seconds = clock() - chunk_start
         chunk_times.append(chunk_seconds)
         emit("chunk_final", chunk, status=outcome, result_reused=False,
-             attempts=attempt, retries=max(0, attempt - 1),
-             valid_first_try=(outcome == "valid" and attempt == 1),
-             empty=(outcome == "valid" and len(relationships) == 0),
-             relationships=len(relationships), entities=len(entities),
-             chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
+            attempts=attempt, retries=max(0, attempt - 1),
+            valid_first_try=(outcome == "valid" and attempt == 1),
+            empty=(outcome == "valid" and len(relationships) == 0),
+            relationships=len(relationships), entities=len(entities),
+            chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
         if outcome == "valid":
             summary["valid"] = summary["valid"] + 1
             failed_in_a_row = 0
