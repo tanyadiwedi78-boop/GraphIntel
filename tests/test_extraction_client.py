@@ -82,7 +82,7 @@ def test_constructor_makes_no_call_and_request_carries_schema(client, server):
     path, headers, request = state["requests"][0]
     sent = {k.lower(): v for k, v in headers.items()}
     assert sent["x-goog-api-key"] == FAKE_KEY
-    assert request["model"] == "gemini-3.8-flash"
+    assert request["model"] == "gemini-3.5-flash-lite"
     assert request["input"] == "test prompt"
     assert request["response_format"]["mime_type"] == "application/json"
     assert request["response_format"]["schema"] == client.schema

@@ -22,25 +22,61 @@ SCHEMA_VERSION = "s3"
 PROMPT_VERSION = "p2-rules-v1"
 
 
+# Plain-English meaning for each entity type, shown in the prompt when the type
+# exists in the ontology. The ontology stays the source of truth: a type missing
+# from configs/ontology.json never appears in the prompt, and a type without a
+# meaning here is listed without one.
+TYPE_MEANINGS = {
+    "Company": "a business acting for itself, such as the filing company or a business it names",
+    "Subsidiary": "a company owned or controlled by another company",
+    "Industry": "a business sector or market, not one company",
+    "Technology": "a specific technology, standard or system",
+    "Risk": "a risk, threat or uncertainty the text describes",
+    "FinancialMetric": "a financial measure such as revenue, net income or par value per share, whether or not the text states its number; the name of a security itself, such as Common Stock, is not one",
+    "Product": "a product or service a company offers",
+}
+
+PROMPT_RULES = """RULES:
+1. Use only the allowed entity types and relations below.
+2. Give an entity a type only when that type truly fits. If no allowed type fits, leave the item out instead of forcing it into the nearest type.
+3. A short list, or an empty list, can be the correct answer. Cover pages and boilerplate often contain nothing worth extracting.
+4. List every entity that fits a type, even one that has no relationship.
+5. A relationship must use two names from your own entities list and follow its direction: relation (source type -> target type).
+6. evidence_quote must be copied word for word from the text AND state the relationship you claim. A quote that only repeats the same words is not evidence. A table row naming a stock class does not show that a company reports a financial metric.
+7. confidence is your honest estimate, from 0 to 1, that the text supports the item. Do not guess.
+"""
+
+
 def build_prompt(chunk: dict, ontology: Ontology) -> str:
-    lines = []
-    lines.append("Extract entities and relationships from the SEC filing text below.")
-    lines.append('Reply with JSON only: {"entities": [...], "relationships": [...]}.')
-    lines.append("Each entity has: name, type.")
-    lines.append("Allowed entity types: " + ", ".join(ontology.entity_types) + ".")
-    lines.append("Each relationship has: relation, source, target, evidence_quote, confidence (0 to 1).")
-    lines.append("source and target must be names from your own entities list.")
-    lines.append("Allowed relations (source type -> target type):")
+    types_text = ", ".join(ontology.entity_types)
+
+    meaning_lines = []
+    for name in ontology.entity_types:
+        if name in TYPE_MEANINGS:
+            meaning_lines.append("- " + name + ": " + TYPE_MEANINGS[name])
+    meanings_text = "\n".join(meaning_lines)
+
+    relation_lines = []
     for name in sorted(ontology.relations.keys()):
         source_type, target_type = ontology.relations[name]
-        lines.append(f"- {name}: {source_type} -> {target_type}")
-    lines.append("List every entity worth remembering, even one that has no relationship.")
-    lines.append("evidence_quote must be copied word for word from the text. Do not guess.")
-    lines.append("If nothing fits, return empty lists.")
-    lines.append("")
-    lines.append("TEXT:")
-    lines.append(chunk["text"])
-    return "\n".join(lines)
+        relation_lines.append("- " + name + ": " + source_type + " -> " + target_type)
+    relations_text = "\n".join(relation_lines)
+
+    return f"""Extract entities and relationships from the SEC filing text below.
+Reply with JSON only: {{"entities": [...], "relationships": [...]}}.
+Each entity has: name, type.
+Each relationship has: relation, source, target, evidence_quote, confidence (0 to 1).
+
+{PROMPT_RULES}
+
+Allowed entity types: {types_text}.
+{meanings_text}
+
+Allowed relations (source type -> target type):
+{relations_text}
+
+TEXT:
+{chunk["text"]}"""
 
 
 def make_work_key(chunk: dict, ontology_fingerprint: str, schema_version: str, prompt_version: str, model_name: str) -> str:
