@@ -133,6 +133,7 @@ def main() -> int:
     print(f"New valid results:     {summary['valid']}")
     print(f"Invalid answers:       {summary['invalid']}")
     print(f"Failed chunks:         {summary['failed']}")
+    print(f"Gave up on:            {summary['gave_up']} (failed or invalid in 3 separate runs; delete a chunk's saved record in {results_dir} to try it again)")
     print(f"Model calls used:      {summary['calls_used']}")
     print(f"Run time:              {summary['elapsed_seconds']} s (wall clock: calls, waiting, validation, saving)")
     print(f"Chunks per minute:     {summary['chunks_per_minute']} (fresh chunks only; skipped chunks are not counted)")
@@ -141,7 +142,7 @@ def main() -> int:
     if summary["stopped_early"]:
         print(f"Stopped early: {summary['stop_reason']}")
     print(f"Results saved in {results_dir}")
-    print("Run the same command again: finished chunks are skipped, nothing is processed twice.")
+    print("Run the same command again: finished chunks are skipped, given-up chunks are left alone, nothing is processed twice.")
     print("Cost this run: unknown (" + client.cost_mode() + "). Measured token usage is in the event log.")
     print("Reminder: real model answers still need hand-checking against the source text before you trust them.")
     return 0

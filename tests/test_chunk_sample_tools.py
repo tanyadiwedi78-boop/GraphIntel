@@ -277,3 +277,204 @@ def test_score_reports_wrong_and_missed_items(tmp_path):
     assert "wrong extraction: Common Stock (FinancialMetric)" in result.stdout
     assert "wrong extraction: Acme Inc. -REPORTS-> Common Stock" in result.stdout
     assert "precision 0/1 = 0.00" in result.stdout
+
+
+def test_repeated_command_visits_every_chunk_exactly_once(tmp_path):
+    # Proof for the whole-corpus flow: 7 chunks, cap 3. Each invocation does
+    # only unfinished chunks; a final invocation does nothing at all.
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    chunks = []
+    for number in range(7):
+        chunks.append(make_runner_chunk("chunk-" + str(number + 1), quote))
+    results_dir = str(tmp_path / "extraction")
+    limits = RunLimits(max_calls=3)
+
+    plan = [3, 3, 1, 0]  # calls each of the four invocations must make
+    summaries = []
+    for expected_calls in plan:
+        steps = []
+        for _ in range(expected_calls):
+            steps.append(good_answer(quote))
+        model = FakeModel(steps)
+        summary = run_extraction(chunks, model, ontology, "fake-model", results_dir, limits,
+                                 sleep=no_sleep)
+        assert len(model.calls) == expected_calls
+        summaries.append(summary)
+    assert summaries[0]["valid"] == 3 and summaries[0]["stop_reason"] == "call cap reached"
+    assert summaries[1]["valid"] == 3
+    assert summaries[2]["valid"] == 1 and summaries[2]["stopped_early"] is False
+    assert summaries[3]["skipped_done"] == 7 and summaries[3]["calls_used"] == 0
+    assert len(os.listdir(results_dir)) == 7
+
+
+def test_failing_chunk_gives_up_and_the_campaign_still_advances(tmp_path):
+    # 5 chunks, cap 3, chunk-2 always fails with a per-chunk error. The runs
+    # must keep visiting the unfinished chunks around it, and after 3 separate
+    # failing runs chunk-2 is left alone instead of burning the cap forever.
+    from app.extraction.client import ChunkFailedError
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    chunks = []
+    for number in range(5):
+        chunks.append(make_runner_chunk("chunk-" + str(number + 1), quote))
+    results_dir = str(tmp_path / "extraction")
+    limits = RunLimits(max_calls=3)
+
+    # Run 1: chunk-1 ok, chunk-2 fails (1 call, no retry), chunk-3 ok; cap hit at chunk-4.
+    model1 = FakeModel([good_answer(quote), ChunkFailedError(400, "cut off"), good_answer(quote)])
+    first = run_extraction(chunks, model1, ontology, "fake-model", results_dir, limits, sleep=no_sleep)
+    assert first["valid"] == 2 and first["failed"] == 1 and first["stop_reason"] == "call cap reached"
+
+    # Run 2: chunk-2 fails again, chunk-4 and chunk-5 finish; everything else resumes.
+    model2 = FakeModel([ChunkFailedError(400, "cut off"), good_answer(quote), good_answer(quote)])
+    second = run_extraction(chunks, model2, ontology, "fake-model", results_dir, limits, sleep=no_sleep)
+    assert second["valid"] == 2 and second["failed"] == 1 and second["skipped_done"] == 2
+
+    # Run 3: only chunk-2 is unfinished; it fails a third separate run.
+    model3 = FakeModel([ChunkFailedError(400, "cut off")])
+    third = run_extraction(chunks, model3, ontology, "fake-model", results_dir, limits, sleep=no_sleep)
+    assert third["failed"] == 1 and third["calls_used"] == 1
+
+    # Run 4: chunk-2 is given up without any model call; nothing else is reprocessed.
+    model4 = FakeModel([])
+    fourth = run_extraction(chunks, model4, ontology, "fake-model", results_dir, limits, sleep=no_sleep)
+    assert len(model4.calls) == 0
+    assert fourth["gave_up"] == 1
+    assert fourth["skipped_done"] == 4
+    assert fourth["calls_used"] == 0
+
+
+def test_invalid_answer_gives_up_after_three_separate_runs(tmp_path):
+    # A chunk whose answer never validates is retried across runs, then left
+    # alone: three separate runs of attempts, no fourth.
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    chunks = [make_runner_chunk("chunk-1", quote), make_runner_chunk("chunk-2", quote)]
+    results_dir = str(tmp_path / "extraction")
+    limits = RunLimits(max_calls=10)
+
+    good_run = FakeModel([good_answer(quote)])
+    run_extraction([chunks[0]], good_run, ontology, "fake-model", results_dir, limits, sleep=no_sleep)
+
+    for expected_runs in [1, 2, 3]:
+        bad_run = FakeModel(["not json at all", "still not json", "nope"])
+        summary = run_extraction(chunks, bad_run, ontology, "fake-model", results_dir, limits,
+                                 sleep=no_sleep)
+        assert summary["invalid"] == 1
+        assert summary["skipped_done"] == 1
+
+    fourth_model = FakeModel([])
+    fourth = run_extraction(chunks, fourth_model, ontology, "fake-model", results_dir, limits,
+                            sleep=no_sleep)
+    assert len(fourth_model.calls) == 0
+    assert fourth["gave_up"] == 1
+    assert fourth["skipped_done"] == 1
+
+
+def test_record_from_before_the_runs_counter_counts_as_one_run(tmp_path):
+    # Records saved by the old code have no "runs" field: they must count as
+    # one run, so they are retried twice more before any give-up.
+    from app.extraction.client import ChunkFailedError
+    from app.extraction.runner import make_work_key
+    ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
+    quote = "develops the Widget Engine"
+    chunk = make_runner_chunk("chunk-1", quote)
+    results_dir = str(tmp_path / "extraction")
+    os.makedirs(results_dir)
+    key = make_work_key(chunk, ontology.fingerprint(), "s3", "p2-rules-v1", "fake-model")
+    old_record = {"status": "failed", "chunk_id": "chunk-1", "work_key": key}
+    with open(os.path.join(results_dir, "chunk-1__" + key + ".json"), "w", encoding="utf-8") as f:
+        json.dump(old_record, f)
+
+    limits = RunLimits(max_calls=3)
+    model = FakeModel([ChunkFailedError(400, "cut off")])
+    summary = run_extraction([chunk], model, ontology, "fake-model", results_dir, limits, sleep=no_sleep)
+    assert len(model.calls) == 1  # retried, not given up
+    assert summary["failed"] == 1
+    with open(os.path.join(results_dir, "chunk-1__" + key + ".json"), "r", encoding="utf-8") as f:
+        saved = json.load(f)
+    assert saved["runs"] == 2
+
+
+def write_result_record(results_dir, chunk_id, status="valid",
+                        prompt_version="p2-rules-v1", schema_version="s3"):
+    results_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "status": status,
+        "chunk_id": chunk_id,
+        "prompt_version": prompt_version,
+        "schema_version": schema_version,
+        "model": "fake-model",
+        "entities": [{"name": "Acme Inc.", "type": "Company"}],
+        "relationships": [],
+    }
+    with open(results_dir / (chunk_id + "__fakekey.json"), "w", encoding="utf-8") as f:
+        json.dump(record, f)
+
+
+def write_labels_file(labels_path, labels):
+    with open(labels_path, "w", encoding="utf-8") as f:
+        json.dump(labels, f)
+
+
+def test_score_fails_clearly_on_malformed_labels_json(tmp_path):
+    labels_path = tmp_path / "labels.json"
+    with open(labels_path, "w", encoding="utf-8") as f:
+        f.write("{not json")
+    result = run_tool("review_extraction.py", tmp_path, ["--labels", str(labels_path)])
+    assert result.returncode == 1
+    assert "not valid JSON" in result.stdout
+
+
+def test_score_fails_clearly_on_bad_label_shape(tmp_path):
+    labels_path = tmp_path / "labels.json"
+    write_labels_file(labels_path, {"chunk-1": {"entities": []}})  # no relationships list
+    result = run_tool("review_extraction.py", tmp_path, ["--labels", str(labels_path)])
+    assert result.returncode == 1
+    assert 'missing the "relationships" list' in result.stdout
+    assert "nothing" not in result.stdout.lower() or "before anything is scored" in result.stdout
+
+
+def test_score_excludes_empty_labels_entry(tmp_path):
+    write_chunks(tmp_path, sample_specs())
+    write_result_record(tmp_path / "extraction", "chunk-2")
+    labels_path = tmp_path / "labels.json"
+    write_labels_file(labels_path, {
+        "chunk-1": {"entities": [], "relationships": [], "notes": ""},
+        "chunk-2": {"entities": [{"name": "Acme Inc.", "type": "Company"}],
+                    "relationships": [], "notes": ""},
+    })
+    result = run_tool("review_extraction.py", tmp_path, ["--labels", str(labels_path)])
+    assert result.returncode == 0
+    assert "chunk-1: labels are empty" in result.stdout
+    assert "Overall across 1 scored chunks" in result.stdout
+    assert "1 labelled chunks were excluded" in result.stdout
+
+
+def test_score_excludes_old_version_results(tmp_path):
+    write_chunks(tmp_path, sample_specs())
+    write_result_record(tmp_path / "extraction", "chunk-1", prompt_version="p1-old")
+    labels_path = tmp_path / "labels.json"
+    write_labels_file(labels_path, {
+        "chunk-1": {"entities": [{"name": "Acme Inc.", "type": "Company"}],
+                    "relationships": [], "notes": ""},
+    })
+    result = run_tool("review_extraction.py", tmp_path, ["--labels", str(labels_path)])
+    assert result.returncode == 1
+    assert "not scored - this result used prompt p1-old" in result.stdout
+    assert "Nothing could be scored" in result.stdout
+
+
+def test_score_excludes_non_valid_results(tmp_path):
+    write_chunks(tmp_path, sample_specs())
+    write_result_record(tmp_path / "extraction", "chunk-1", status="invalid")
+    labels_path = tmp_path / "labels.json"
+    write_labels_file(labels_path, {
+        "chunk-1": {"entities": [{"name": "Acme Inc.", "type": "Company"}],
+                    "relationships": [], "notes": ""},
+    })
+    result = run_tool("review_extraction.py", tmp_path, ["--labels", str(labels_path)])
+    assert result.returncode == 1
+    assert 'status "invalid", not valid' in result.stdout
+    assert "Nothing could be scored" in result.stdout

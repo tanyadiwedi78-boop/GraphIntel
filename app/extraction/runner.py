@@ -144,6 +144,25 @@ class RunLimits:
     stop_after_failed_chunks: int = 5
 
 
+# A chunk that keeps failing (or staying invalid) in this many SEPARATE runs is
+# skipped from then on, so a repeated whole-corpus command always advances and a
+# broken chunk cannot burn the call cap forever. Its saved record stays on disk;
+# delete that record to try the chunk again from zero.
+GIVE_UP_AFTER_RUNS = 3
+
+
+def give_up(saved: Optional[dict]) -> bool:
+    """True when a saved failed/invalid record has had enough separate runs."""
+    if saved is None:
+        return False
+    if saved.get("status") not in ("failed", "invalid"):
+        return False
+    runs = saved.get("runs")
+    if not isinstance(runs, int) or isinstance(runs, bool):
+        runs = 1  # records from before this counter existed count as one run
+    return runs >= GIVE_UP_AFTER_RUNS
+
+
 def run_extraction(
     chunks: List[dict],
     call_model: Callable[[str], str],
@@ -162,6 +181,7 @@ def run_extraction(
         "valid": 0,
         "invalid": 0,
         "failed": 0,
+        "gave_up": 0,
         "calls_used": 0,
         "stopped_early": False,
         "stop_reason": "",
@@ -211,10 +231,17 @@ def run_extraction(
         chunk_id = chunk["chunk_id"]
         work_key = make_work_key(chunk, fingerprint, SCHEMA_VERSION, PROMPT_VERSION, model_name)
 
-        if already_done(results_dir, chunk_id, work_key):
+        saved_record = load_result(results_dir, chunk_id, work_key)
+        if saved_record is not None and saved_record.get("status") == "valid":
             summary["skipped_done"] = summary["skipped_done"] + 1
             emit("chunk_final", chunk, status="skipped", result_reused=True,
                 attempts=0, valid_first_try=None, retries=0)
+            continue
+        if give_up(saved_record):
+            summary["gave_up"] = summary["gave_up"] + 1
+            emit("chunk_final", chunk, status="gave_up", result_reused=True,
+                attempts=0, valid_first_try=None, retries=0,
+                reason="failed or invalid in " + str(GIVE_UP_AFTER_RUNS) + " separate runs")
             continue
 
         prompt = build_prompt(chunk, ontology)
@@ -306,8 +333,16 @@ def run_extraction(
 
         # One record per chunk and recipe: run metadata once, then the validated
         # entities and relationships in the model's own shape.
+        runs_count = 1
+        if saved_record is not None:
+            previous_runs = saved_record.get("runs")
+            if isinstance(previous_runs, int) and not isinstance(previous_runs, bool) and previous_runs >= 1:
+                runs_count = previous_runs + 1
+            else:
+                runs_count = 2
         record = {
             "status": outcome,
+            "runs": runs_count,
             "chunk_id": chunk_id,
             "work_key": work_key,
             "model": model_name,

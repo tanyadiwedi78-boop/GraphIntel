@@ -187,27 +187,73 @@ def run_write_labels(settings, chunk_ids: list, labels_path: Path) -> int:
     return 0
 
 
+def check_labels_file(labels) -> list:
+    """Shape problems in the labels file, as a list of messages (empty = fine)."""
+    problems = []
+    if not isinstance(labels, dict):
+        problems.append("the file must be a JSON object like {\"chunk-id\": {\"entities\": [...], \"relationships\": [...]}}")
+        return problems
+    if len(labels) == 0:
+        problems.append("the file has no chunk entries - create them with --write-labels")
+        return problems
+    for chunk_id in labels:
+        entry = labels[chunk_id]
+        if not isinstance(entry, dict):
+            problems.append(f"{chunk_id}: the entry must be an object with entities and relationships lists")
+            continue
+        for field in ["entities", "relationships"]:
+            if field not in entry:
+                problems.append(f"{chunk_id}: missing the \"{field}\" list")
+            elif not isinstance(entry[field], list):
+                problems.append(f"{chunk_id}: \"{field}\" must be a list")
+    return problems
+
+
 def run_score(settings, labels_path: Path) -> int:
     if not labels_path.exists():
         print(f"No labels file at {labels_path}. Create one with --write-labels.")
         return 1
     with open(labels_path, "r", encoding="utf-8") as f:
-        labels = json.load(f)
+        raw = f.read()
+    try:
+        labels = json.loads(raw)
+    except json.JSONDecodeError as error:
+        print(f"Labels file is not valid JSON: {error}. Fix it or recreate it with --write-labels.")
+        return 1
+    problems = check_labels_file(labels)
+    if len(problems) > 0:
+        print("Labels file needs fixing before anything is scored:")
+        for problem in problems:
+            print("  " + problem)
+        return 1
     results_dir = str(settings.data_dir / "extraction")
     totals = {"e_pred": 0, "e_correct": 0, "e_expected": 0,
               "r_pred": 0, "r_correct": 0, "r_expected": 0}
     unscored = 0
+    scored = 0
     for chunk_id in labels:
         entry = labels[chunk_id]
+        if len(entry["entities"]) == 0 and len(entry["relationships"]) == 0:
+            print(f"{chunk_id}: labels are empty - fill them in from the source text, or delete this entry. Not scored.")
+            unscored = unscored + 1
+            continue
         result_path, record = find_result(results_dir, chunk_id)
         if record is None:
             print(f"{chunk_id}: no saved result yet, not scored.")
             unscored = unscored + 1
             continue
-        print(f"{chunk_id}: scored against {result_path}")
         if record.get("prompt_version") != PROMPT_VERSION or record.get("schema_version") != SCHEMA_VERSION:
-            print(f"  warning: this result used prompt {record.get('prompt_version')} / schema "
-                  f"{record.get('schema_version')}, but the current code is {PROMPT_VERSION} / {SCHEMA_VERSION}.")
+            print(f"{chunk_id}: not scored - this result used prompt {record.get('prompt_version')} / schema "
+                  f"{record.get('schema_version')}, but the current code is {PROMPT_VERSION} / {SCHEMA_VERSION}. "
+                  "Re-extract the chunk first, or the numbers would mix two different recipes.")
+            unscored = unscored + 1
+            continue
+        if record.get("status") != "valid":
+            print(f"{chunk_id}: not scored - the saved result has status \"{record.get('status')}\", not valid.")
+            unscored = unscored + 1
+            continue
+        scored = scored + 1
+        print(f"{chunk_id}: scored against {result_path}")
         predicted_entities = record.get("entities", [])
         expected_entities = entry.get("entities", [])
         e_correct, e_wrong, e_missed = match_items(predicted_entities, expected_entities, ENTITY_FIELDS)
@@ -232,16 +278,21 @@ def run_score(settings, labels_path: Path) -> int:
         totals["r_pred"] = totals["r_pred"] + len(predicted_rels)
         totals["r_correct"] = totals["r_correct"] + r_correct
         totals["r_expected"] = totals["r_expected"] + len(expected_rels)
+    if scored == 0:
+        print("=" * 60)
+        print("Nothing could be scored. Every labelled chunk was excluded above; fix the reasons and score again.")
+        return 1
     print("=" * 60)
-    print("Overall across scored chunks:")
+    print(f"Overall across {scored} scored chunks (excluded chunks change nothing below):")
     print(f"  entities: precision {ratio_text(totals['e_correct'], totals['e_pred'])}, "
           f"recall {ratio_text(totals['e_correct'], totals['e_expected'])}")
     print(f"  relationships: precision {ratio_text(totals['r_correct'], totals['r_pred'])}, "
           f"recall {ratio_text(totals['r_correct'], totals['r_expected'])}")
     if unscored > 0:
-        print(f"  ({unscored} labelled chunks had no saved result and were not scored.)")
+        print(f"  ({unscored} labelled chunks were excluded for the reasons printed above.)")
     print("Precision: of what the model extracted, how much is right. "
           "Recall: of what the source really says, how much the model found.")
+    print("These numbers describe only the chunks you labeled - not the whole corpus.")
     return 0
 
 
