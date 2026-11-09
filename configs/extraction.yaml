@@ -1,0 +1,22 @@
+# Extraction provider settings. The exact model ids live here.
+#
+# Precedence: a CLI flag wins over this file, this file wins over the built-in
+# defaults. API keys stay in .env, the call cap stays MAX_EXTRACTION_CALLS in
+# .env, and per-minute rate limits stay CLI flags copied from your provider
+# console pages. Nothing in this file authorizes a paid call on its own:
+# OpenAI still needs --openai-allow-paid on the command line.
+#
+# max_retries is retries AFTER the first try: 2 means at most 3 attempts per
+# chunk on a provider. fallback_on lists the failure causes allowed to move
+# the run to the fallback provider; schema_invalid_after_repair means the
+# answer failed validation once, was repaired once, and failed again.
+# circuit_breaker: consecutive eligible failed calls are counted per provider.
+# Only that provider opens for cooldown_s; healthy fallback can keep serving.
+# After cooldown the primary is half-open and tested again. Valid success resets
+# only its own streak. A rejected schema repair counts as one eligible failure.
+extraction:
+  providers:
+    - {name: gemini, model: gemini-3.5-flash-lite, max_retries: 2, timeout_s: 60}
+    - {name: openai, model: gpt-6-luna, max_retries: 2, timeout_s: 60}
+  fallback_on: [rate_limit, server_error, timeout, schema_invalid_after_repair]
+  circuit_breaker: {consecutive_failures: 5, cooldown_s: 120}
