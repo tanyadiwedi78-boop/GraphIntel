@@ -215,6 +215,34 @@ def test_invalid_answer_is_retried_at_once_without_waiting(ontology, tmp_path):
     assert len(model.calls) == 2
 
 
+def test_retry_prompt_carries_the_validation_problems(ontology, tmp_path):
+    bad = json.dumps({"entities": [{"name": "Acme Corp", "type": "Company"}],
+                      "relationships": [{"relation": "OWNS", "source": "Acme Corp",
+                                          "target": "Acme Corp",
+                                          "evidence_quote": QUOTE, "confidence": 0.9}]})
+    model = FakeModel([bad, good_answer(QUOTE)])
+    sleep, _ = no_sleep_recorder()
+    summary = run_extraction([make_chunk(1)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert summary["valid"] == 1
+    assert len(model.calls) == 2
+    first_prompt, retry_prompt = model.calls
+    assert "previous answer was rejected" in retry_prompt
+    assert "OWNS" in retry_prompt   # the validator's problem text reaches the model
+    assert "previous answer was rejected" not in first_prompt
+    assert retry_prompt.startswith(first_prompt)   # same task and text above the feedback
+
+
+def test_first_try_prompt_is_unchanged_by_feedback_logic(ontology, tmp_path):
+    from app.extraction.runner import build_prompt
+    model = FakeModel([good_answer(QUOTE)])
+    sleep, _ = no_sleep_recorder()
+    summary = run_extraction([make_chunk(1)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
+    assert summary["valid"] == 1
+    assert len(model.calls) == 1
+    chunk = make_chunk(1)
+    assert model.calls[0] == build_prompt(chunk, ontology)  # exact base prompt
+
+
 def test_invalid_after_all_attempts_is_saved_with_raw_response(ontology, tmp_path):
     model = FakeModel(["bad1", "bad2", "bad3"])
     sleep, _ = no_sleep_recorder()

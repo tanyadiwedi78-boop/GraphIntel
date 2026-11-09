@@ -79,6 +79,26 @@ TEXT:
 {chunk["text"]}"""
 
 
+def build_retry_prompt(base_prompt: str, problems: List[str]) -> str:
+    """Second-and-later attempt for the same chunk: same task, plus what failed.
+
+    Without this the retry sends the identical prompt, and with a fixed seed the
+    model tends to repeat the identical violation - each repeat still costs one
+    call. Naming the validator's problems gives the model the information it
+    needs to correct the answer instead of reproducing it.
+    """
+    lines = []
+    for problem in problems:
+        lines.append("- " + problem)
+    return (base_prompt
+            + "\n\nYour previous answer was rejected for these reasons:\n"
+            + "\n".join(lines)
+            + "\nFix these problems; the task and the text above are unchanged."
+            + " If fixing a problem would require inventing something the text does"
+            + " not say, leave that item out instead - a shorter or empty list can"
+            + " be the correct answer.")
+
+
 def make_work_key(chunk: dict, ontology_fingerprint: str, schema_version: str, prompt_version: str, model_name: str) -> str:
     text_hash = hashlib.sha256(chunk["text"].encode("utf-8")).hexdigest()[:16]
     pieces = [text_hash, ontology_fingerprint, schema_version, prompt_version, model_name]
@@ -254,7 +274,8 @@ def run_extraction(
                 reason="content failed or invalid in " + str(limits.give_up_after_runs) + " separate runs")
             continue
 
-        prompt = build_prompt(chunk, ontology)
+        base_prompt = build_prompt(chunk, ontology)
+        prompt = base_prompt
 
         attempt = 0
         outcome = "failed"
@@ -337,11 +358,16 @@ def run_extraction(
                 validation_status = "valid"
                 last_error_text = ""
             emit("attempt", chunk, attempt=attempt, status=validation_status,
-                metrics=metrics, problems=problems)
+                metrics=metrics, problems=problems,
+                retry_with_feedback=(prompt != base_prompt))
             if is_valid:
                 outcome = "valid"
                 break
             outcome = "invalid"   # bad answer: try again at once, no wait
+            if len(problems) > 0:
+                # Show the next attempt what was rejected; otherwise the
+                # identical prompt with a fixed seed just repeats the violation.
+                prompt = build_retry_prompt(base_prompt, problems)
 
         # One record per chunk and recipe: run metadata once, then the validated
         # entities and relationships in the model's own shape.
