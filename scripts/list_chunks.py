@@ -35,9 +35,16 @@ def read_chunks(chunks_path: Path) -> list:
 
 
 def pick_sample(chunks: list, size: int) -> list:
-    """Positions of `size` chunks, spread across filings and sections."""
-    docs = []
+    """Positions of `size` chunks, spread across documents, sections and kinds.
+
+    Deterministic, no randomness. Documents rotate round-robin so every
+    filing is represented. Inside each turn, prefer a section not yet in
+    the sample, then the table/text kind that is underrepresented so far,
+    then simply the next chunk - so the sample always fills up to
+    min(size, len(chunks)) even when every chunk shares one section id.
+    """
     queues = {}
+    docs = []
     for position in range(len(chunks)):
         accession = str(chunks[position].get("accession"))
         if accession not in queues:
@@ -47,6 +54,8 @@ def pick_sample(chunks: list, size: int) -> list:
 
     picked = []
     used_items = set()
+    picked_tables = 0
+    picked_text = 0
     while len(picked) < size:
         progressed = False
         for accession in docs:
@@ -57,33 +66,27 @@ def pick_sample(chunks: list, size: int) -> list:
                 continue
             chosen = None
             for position in queue:
-                item = str(chunks[position].get("item_id"))
-                if item not in used_items:
+                if str(chunks[position].get("item_id")) not in used_items:
                     chosen = position
                     break
-            if chosen is None and len(picked) >= len(docs):
-                chosen = queue[0]
             if chosen is None:
-                continue
+                want_table = picked_tables <= picked_text
+                for position in queue:
+                    if bool(chunks[position].get("is_table")) == want_table:
+                        chosen = position
+                        break
+            if chosen is None:
+                chosen = queue[0]
             queue.remove(chosen)
             used_items.add(str(chunks[chosen].get("item_id")))
+            if chunks[chosen].get("is_table"):
+                picked_tables = picked_tables + 1
+            else:
+                picked_text = picked_text + 1
             picked.append(chosen)
             progressed = True
         if not progressed:
             break
-
-    has_table = False
-    for position in picked:
-        if chunks[position].get("is_table"):
-            has_table = True
-    if not has_table:
-        first_table = None
-        for position in range(len(chunks)):
-            if chunks[position].get("is_table") and position not in picked:
-                first_table = position
-                break
-        if first_table is not None and len(picked) > 0:
-            picked[len(picked) - 1] = first_table
     return picked
 
 

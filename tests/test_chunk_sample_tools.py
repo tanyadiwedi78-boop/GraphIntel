@@ -724,3 +724,65 @@ def test_pilot_scope_and_full_scope_coverage_under_the_cap(tmp_path):
     assert final["skipped_done"] == 6
     assert final["valid"] == 0 and final["calls_used"] == 0
     assert len(os.listdir(results_dir)) == 6
+
+
+def document_only_specs():
+    # The shape of the real corpus sample: one section id (DOCUMENT) for
+    # every chunk, two filings, mostly tables - the case that starved the
+    # old selector.
+    specs = []
+    specs.append({"chunk_id": "doc-a-0", "accession": "0000000000-26-000010",
+                  "item_id": "DOCUMENT", "is_table": True, "text": "Filing A cover."})
+    specs.append({"chunk_id": "doc-a-1", "accession": "0000000000-26-000010",
+                  "item_id": "DOCUMENT", "is_table": True, "text": "Filing A body."})
+    for number in range(6):
+        specs.append({"chunk_id": "doc-b-" + str(number),
+                      "accession": "0000000000-26-000011",
+                      "item_id": "DOCUMENT", "is_table": number % 3 != 2,
+                      "text": "Filing B chunk " + str(number) + "."})
+    return specs
+
+
+def test_sample_fills_requested_count_on_document_only_corpus(tmp_path):
+    # Every chunk shares one section id: section metadata alone cannot
+    # diversify, and the sample must still reach the requested count.
+    write_chunks(tmp_path, document_only_specs())
+    result = run_tool("list_chunks.py", tmp_path, ["--sample", "4"])
+    assert result.returncode == 0
+    assert "Sample of 4 chunks" in result.stdout
+    assert "Could only pick" not in result.stdout
+    ids = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped[:2] in ["1.", "2.", "3.", "4."]:
+            ids.append(stripped.split()[1])
+    assert len(ids) == 4
+    has_a = False
+    has_b = False
+    for chunk_id in ids:
+        if chunk_id.startswith("doc-a"):
+            has_a = True
+        if chunk_id.startswith("doc-b"):
+            has_b = True
+    assert has_a and has_b  # both documents represented
+    assert "table: True" in result.stdout and "table: False" in result.stdout
+
+
+def test_sample_covers_every_row_when_size_equals_corpus(tmp_path):
+    write_chunks(tmp_path, document_only_specs())
+    result = run_tool("list_chunks.py", tmp_path, ["--sample", "8"])
+    assert result.returncode == 0
+    assert "Sample of 8 chunks" in result.stdout
+    for spec in document_only_specs():
+        count = 0
+        for line in result.stdout.splitlines():
+            if spec["chunk_id"] in line and line.strip()[:2].rstrip(".") in \
+                    ["1", "2", "3", "4", "5", "6", "7", "8"]:
+                count = count + 1
+        assert count == 1  # each chunk picked exactly once, no repeats
+
+
+def test_sample_never_exceeds_available_rows(tmp_path):
+    write_chunks(tmp_path, sample_specs())
+    result = run_tool("list_chunks.py", tmp_path, ["--sample", "10"])
+    assert "only 3 chunks exist" in result.stdout
