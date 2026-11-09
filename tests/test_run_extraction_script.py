@@ -40,6 +40,7 @@ def run_script(data_dir, extra_args=None, extra_env=None):
     # .env but never overrides one that is already set. Tests must never see a
     # real key, or the "no key" test would make live calls on a keyed machine.
     env["GEMINI_API_KEY"] = ""
+    env["GROQ_API_KEY"] = ""
     if extra_env is not None:
         env.update(extra_env)
     return subprocess.run(args, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
@@ -80,3 +81,27 @@ def test_missing_api_key_is_a_setup_problem_not_a_crash(tmp_path):
     assert "Gemini setup problem" in result.stdout
     assert "GEMINI_API_KEY" in result.stdout
     assert "Traceback" not in result.stderr
+
+
+def test_groq_provider_needs_its_own_key(tmp_path):
+    write_chunks(tmp_path, 3)
+    result = run_script(tmp_path, GOOD_FLAGS + ["--provider", "groq"])
+    assert result.returncode == 1
+    assert "Groq setup problem" in result.stdout
+    assert "GROQ_API_KEY" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_groq_provider_uses_the_same_cost_gates(tmp_path):
+    write_chunks(tmp_path, 3)
+    flags = ["--gemini-max-rpm", "100", "--gemini-max-tpm", "100000", "--provider", "groq"]
+    result = run_script(tmp_path, flags, {"GROQ_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "Live Groq calls stay blocked" in result.stdout
+    assert "--gemini-assume-free" in result.stdout
+
+
+def test_unknown_provider_is_rejected(tmp_path):
+    write_chunks(tmp_path, 3)
+    result = run_script(tmp_path, GOOD_FLAGS + ["--provider", "other"])
+    assert result.returncode != 0

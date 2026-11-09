@@ -1,4 +1,8 @@
-"""Run the extraction job over the saved chunks with the real Gemini API."""
+"""Run the extraction job over the saved chunks with a real provider API.
+
+Gemini is the default provider; --provider groq uses the same runner,
+validator, cache and review tooling with a Groq model instead.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import ConfigError, load_settings
 from app.extraction.client import GeminiClient
+from app.extraction.groq_client import GroqClient
 from app.extraction.runner import JsonlEvents, RunLimits, run_extraction
 from app.graph.ontology import load_ontology
 
@@ -58,6 +63,10 @@ def main() -> int:
     parser.add_argument("--chunk-ids", default=None,
                         help="comma-separated chunk ids to extract instead of the first --max-chunks chunks")
     parser.add_argument("--model", default="gemini-3.8-flash", help="Gemini model id (default: gemini-3.8-flash)")
+    parser.add_argument("--provider", default="gemini", choices=["gemini", "groq"],
+                        help="which provider to call (default: gemini)")
+    parser.add_argument("--groq-model", default="openai/gpt-oss-20b", dest="groq_model",
+                        help="Groq model id, used with --provider groq (default: openai/gpt-oss-20b)")
     parser.add_argument("--gemini-assume-free", action="store_true",
                         help="you checked Google AI Studio and this project has NO billing account "
                              "(free tier). The code cannot check that for you. Required for any "
@@ -146,26 +155,44 @@ def main() -> int:
                        give_up_after_runs=args.give_up_after_runs,
                        retry_given_up=args.retry_given_up)
 
+    if args.provider == "groq":
+        provider_name = "Groq"
+        limits_page = "the Groq console limits page"
+        billing_check = "you checked the Groq console (Billing / Plans page)"
+    else:
+        provider_name = "Gemini"
+        limits_page = "the AI Studio rate limit page"
+        billing_check = "you checked Google AI Studio (API keys / Projects page)"
     if not args.gemini_assume_free:
-        print("Live Gemini calls stay blocked until you pass --gemini-assume-free.")
-        print("That flag means: you checked Google AI Studio (API keys / Projects page)")
-        print("and this project has NO billing account linked, so it stays on the free tier.")
-        print("The code cannot check that for you. Paid calls are not implemented in this build.")
+        print(f"Live {provider_name} calls stay blocked until you pass --gemini-assume-free.")
+        print(f"That flag means: {billing_check}")
+        print("and this account has NO paid plan or billing linked, so it stays on the free tier.")
+        print("The code cannot check that for you; the flag is an attestation, not billing")
+        print("protection. Paid calls are not implemented in this build.")
         return 1
     if args.gemini_max_rpm is None or args.gemini_max_tpm is None:
-        print("Live Gemini calls also need --gemini-max-rpm and --gemini-max-tpm:")
+        print(f"Live {provider_name} calls also need --gemini-max-rpm and --gemini-max-tpm:")
         print("your account's requests-per-minute and input-tokens-per-minute limits,")
-        print("copied from the AI Studio rate limit page. Limits are per project and per")
+        print(f"copied from {limits_page}. Limits are per account and per")
         print("model and can change with your tier, so this build invents no numbers.")
         return 1
 
-    try:
-        client = GeminiClient(ontology, model_id=args.model, assume_free=True,
-                              max_requests_per_minute=args.gemini_max_rpm,
-                              max_tokens_per_minute=args.gemini_max_tpm)
-    except ValueError as error:
-        print(f"Gemini setup problem: {error}")
-        return 1
+    if args.provider == "groq":
+        try:
+            client = GroqClient(ontology, model_id=args.groq_model, assume_free=True,
+                                max_requests_per_minute=args.gemini_max_rpm,
+                                max_tokens_per_minute=args.gemini_max_tpm)
+        except ValueError as error:
+            print(f"Groq setup problem: {error}")
+            return 1
+    else:
+        try:
+            client = GeminiClient(ontology, model_id=args.model, assume_free=True,
+                                  max_requests_per_minute=args.gemini_max_rpm,
+                                  max_tokens_per_minute=args.gemini_max_tpm)
+        except ValueError as error:
+            print(f"Gemini setup problem: {error}")
+            return 1
 
     results_dir = settings.data_dir / "extraction"
     run_id = uuid.uuid4().hex
