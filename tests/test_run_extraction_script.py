@@ -35,7 +35,11 @@ def run_script(data_dir, extra_args=None, extra_env=None):
     env = dict(os.environ)
     env["DATA_DIR"] = str(data_dir)
     env["MAX_EXTRACTION_CALLS"] = "100"
-    env.pop("GEMINI_API_KEY", None)   # tests never see a real key
+    # Empty string, not a missing variable: the script loads .env in the repo
+    # root, and dotenv fills a MISSING variable back in from a developer's real
+    # .env but never overrides one that is already set. Tests must never see a
+    # real key, or the "no key" test would make live calls on a keyed machine.
+    env["GEMINI_API_KEY"] = ""
     if extra_env is not None:
         env.update(extra_env)
     return subprocess.run(args, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
