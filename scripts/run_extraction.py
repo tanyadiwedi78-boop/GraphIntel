@@ -67,14 +67,18 @@ def main() -> int:
                         help="which provider to call (default: gemini)")
     parser.add_argument("--groq-model", default="openai/gpt-oss-20b", dest="groq_model",
                         help="Groq model id, used with --provider groq (default: openai/gpt-oss-20b)")
-    parser.add_argument("--gemini-assume-free", action="store_true",
-                        help="you checked Google AI Studio and this project has NO billing account "
-                             "(free tier). The code cannot check that for you. Required for any "
+    parser.add_argument("--gemini-assume-free", "--assume-free", dest="gemini_assume_free",
+                        action="store_true",
+                        help="you checked the provider console and this account has NO paid plan "
+                             "or billing linked (free tier). The code cannot check that for you; "
+                             "the flag is an attestation, not billing protection. Required for any "
                              "live call; paid calls are not implemented in this build.")
-    parser.add_argument("--gemini-max-rpm", type=int, default=None,
-                        help="requests per minute limit from YOUR AI Studio rate limit page")
-    parser.add_argument("--gemini-max-tpm", type=int, default=None,
-                        help="input tokens per minute limit from YOUR AI Studio rate limit page")
+    parser.add_argument("--gemini-max-rpm", "--max-rpm", dest="gemini_max_rpm",
+                        type=int, default=None,
+                        help="requests per minute limit from YOUR provider's rate limit page")
+    parser.add_argument("--gemini-max-tpm", "--max-tpm", dest="gemini_max_tpm",
+                        type=int, default=None,
+                        help="input tokens per minute limit from YOUR provider's rate limit page")
     parser.add_argument("--max-documents", type=int, default=1,
                         help="how many documents this run may touch (default 1). A scope limiter, "
                              "not a cost budget: the default keeps the first runs a measured "
@@ -164,14 +168,16 @@ def main() -> int:
         limits_page = "the AI Studio rate limit page"
         billing_check = "you checked Google AI Studio (API keys / Projects page)"
     if not args.gemini_assume_free:
-        print(f"Live {provider_name} calls stay blocked until you pass --gemini-assume-free.")
+        print(f"Live {provider_name} calls stay blocked until you pass --assume-free")
+        print("(the older --gemini-assume-free name also works).")
         print(f"That flag means: {billing_check}")
         print("and this account has NO paid plan or billing linked, so it stays on the free tier.")
         print("The code cannot check that for you; the flag is an attestation, not billing")
         print("protection. Paid calls are not implemented in this build.")
         return 1
     if args.gemini_max_rpm is None or args.gemini_max_tpm is None:
-        print(f"Live {provider_name} calls also need --gemini-max-rpm and --gemini-max-tpm:")
+        print(f"Live {provider_name} calls also need --max-rpm and --max-tpm")
+        print("(older names --gemini-max-rpm and --gemini-max-tpm also work):")
         print("your account's requests-per-minute and input-tokens-per-minute limits,")
         print(f"copied from {limits_page}. Limits are per account and per")
         print("model and can change with your tier, so this build invents no numbers.")
