@@ -422,7 +422,12 @@ def run_extraction(
 
             prepare = getattr(call_model, "prepare_call", None)
             if callable(prepare):
-                cooldown_wait = prepare()
+                exhausted_models = []
+                if provider_budgets:
+                    for budget_model, budget in provider_budgets.items():
+                        if attempts_by_model.get(budget_model, 0) >= budget:
+                            exhausted_models.append(budget_model)
+                cooldown_wait = prepare(exhausted_models)
                 if cooldown_wait > 0:
                     sleep(cooldown_wait)
                     chunk_retry_wait += cooldown_wait

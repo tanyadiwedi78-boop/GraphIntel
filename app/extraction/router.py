@@ -70,9 +70,12 @@ class ProviderRouter:
                 self.active_index = index
                 return
 
-    def prepare_call(self):
+    def prepare_call(self, exhausted_models=None):
         # Cooldown expiry permits a primary probe even mid-chunk.
-        if self.open_until[0] > 0 and self.available(0):
+        if exhausted_models is None:
+            exhausted_models = []
+        if (self.open_until[0] > 0 and self.available(0)
+                and self.clients[0].model_name not in exhausted_models):
             self.active_index = 0
         if not self.available(self.active_index):
             for index in range(len(self.clients)):
