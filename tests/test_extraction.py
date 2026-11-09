@@ -592,3 +592,22 @@ def test_invalid_answer_then_two_503_preserves_rejected_answer_and_both_error_ki
         "validation_failed", "http_503", "http_503"]
     assert model.calls[1] == model.calls[2]
     assert model.calls[0] != model.calls[1]  # feedback sent, but no repaired response received
+
+
+def test_prompt_distinguishes_alias_definition_ownership_and_potential_risk(ontology):
+    from app.extraction.runner import build_prompt
+    chunk = make_chunk(1)
+    chunk["text"] = ('Each of the terms the Company and Apple refers collectively '
+                     'to Apple Inc. and its wholly owned subsidiaries. Statements '
+                     'regarding the potential future impact of the COVID-19 pandemic '
+                     'on the Company are forward-looking statements. '
+                     'Business Seasonality and Product Introductions')
+    prompt = build_prompt(chunk, ontology)
+    assert "not an ownership link between those names" in prompt
+    assert "never turn the company itself into a Subsidiary" in prompt
+    assert "Do not invent named subsidiaries from an unnamed collective" in prompt
+    assert "keep words such as potential or may" in prompt
+    assert "A heading alone states no relationship" in prompt
+    assert chunk["text"] in prompt
+    assert "OWNS: Company -> Subsidiary" in prompt  # ontology unchanged
+    assert "FACES: Company -> Risk" in prompt

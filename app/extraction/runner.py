@@ -19,7 +19,7 @@ from app.graph.ontology import Ontology
 # prompt text changes. Both are part of the work key, so old results are never
 # mistaken for results of a new recipe.
 SCHEMA_VERSION = "s3"
-PROMPT_VERSION = "p2-rules-v1"
+PROMPT_VERSION = "p3-alias-evidence-v1"
 
 
 # Plain-English meaning for each entity type, shown in the prompt when the type
@@ -44,6 +44,8 @@ PROMPT_RULES = """RULES:
 5. A relationship must use two names from your own entities list and follow its direction: relation (source type -> target type).
 6. evidence_quote must be copied word for word from the text AND state the relationship you claim. A quote that only repeats the same words is not evidence. A table row naming a stock class does not show that a company reports a financial metric.
 7. confidence is your honest estimate, from 0 to 1, that the text supports the item. Do not guess.
+8. A definition saying names refer to the same company or collectively to a company and its subsidiaries is not an ownership link between those names. Use one company name for aliases; never turn the company itself into a Subsidiary to make OWNS fit. Do not invent named subsidiaries from an unnamed collective.
+9. A specific potential risk can be a Risk even in forward-looking text, but its evidence must explicitly connect that risk to the company and keep words such as potential or may. Do not turn a possible impact into a realized fact. A heading alone states no relationship.
 """
 
 

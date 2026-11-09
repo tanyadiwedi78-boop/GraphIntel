@@ -128,3 +128,9 @@ Throughput labels distinguish new validator-passing results from all processed
 chunks (including failed/invalid). Neither proves factual accuracy. A mixed
 validation/provider failure keeps rejected_responses and full attempt_records;
 parked transient work does not count toward content give-up.
+
+The current prompt recipe is p3-alias-evidence-v1: alias/collective definitions do
+not create ownership links, unnamed subsidiaries are not invented, and potential
+risk evidence keeps its qualification. Older result files remain, but the new
+prompt key requires a selected-chunk recheck before accepting this recipe. This
+is not an instruction to restart the whole corpus.

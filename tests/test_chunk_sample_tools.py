@@ -225,7 +225,7 @@ def test_review_sheet_shows_source_and_saved_result(tmp_path):
     record = {
         "status": "valid",
         "chunk_id": "chunk-2",
-        "prompt_version": "p2-rules-v1",
+        "prompt_version": "p3-alias-evidence-v1",
         "schema_version": "s3",
         "model": "fake-model",
         "entities": [{"name": "Acme Inc.", "type": "Company"}],
@@ -247,7 +247,7 @@ def test_score_reports_wrong_and_missed_items(tmp_path):
     record = {
         "status": "valid",
         "chunk_id": "chunk-1",
-        "prompt_version": "p2-rules-v1",
+        "prompt_version": "p3-alias-evidence-v1",
         "schema_version": "s3",
         "model": "fake-model",
         "entities": [
@@ -383,7 +383,7 @@ def test_record_from_before_the_runs_counter_counts_as_one_run(tmp_path):
     chunk = make_runner_chunk("chunk-1", quote)
     results_dir = str(tmp_path / "extraction")
     os.makedirs(results_dir)
-    key = make_work_key(chunk, ontology.fingerprint(), "s3", "p2-rules-v1", "fake-model")
+    key = make_work_key(chunk, ontology.fingerprint(), "s3", "p3-alias-evidence-v1", "fake-model")
     old_record = {"status": "failed", "chunk_id": "chunk-1", "work_key": key}
     with open(os.path.join(results_dir, "chunk-1__" + key + ".json"), "w", encoding="utf-8") as f:
         json.dump(old_record, f)
@@ -399,7 +399,7 @@ def test_record_from_before_the_runs_counter_counts_as_one_run(tmp_path):
 
 
 def write_result_record(results_dir, chunk_id, status="valid",
-                        prompt_version="p2-rules-v1", schema_version="s3"):
+                        prompt_version="p3-alias-evidence-v1", schema_version="s3"):
     results_dir.mkdir(parents=True, exist_ok=True)
     record = {
         "status": status,
@@ -498,7 +498,7 @@ def test_transient_failures_never_give_up_and_stay_pending(tmp_path):
         assert summary["gave_up"] == 0
         assert summary["calls_used"] == 3  # in-run retries count against the cap
     from app.extraction.runner import make_work_key
-    key = make_work_key(chunk, ontology.fingerprint(), "s3", "p2-rules-v1", "fake-model")
+    key = make_work_key(chunk, ontology.fingerprint(), "s3", "p3-alias-evidence-v1", "fake-model")
     with open(os.path.join(results_dir, "chunk-1__" + key + ".json"), "r", encoding="utf-8") as f:
         saved = json.load(f)
     assert saved["failure_kind"] == "transient"

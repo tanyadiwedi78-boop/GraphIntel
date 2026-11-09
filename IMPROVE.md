@@ -225,3 +225,22 @@ repair's effectiveness is still unknown. This is not evidence of a quota error.
   live calls, source/ontology edits or semantic correction. Original laptop raw
   rejected answer cannot be recreated by this code change; only the log proves
   the error pattern until her saved result/source is inspected.
+
+## 2026-11-09 - chunk-059 source-grounded alias clarification
+
+The source defines Company/Apple collectively as Apple Inc. and its wholly owned
+subsidiaries; it does not identify Apple and Apple Inc. as owner and subsidiary.
+No subsidiary is named. The source separately describes a potential future
+COVID-19 impact on the company, not a realized loss. Its final section heading
+alone supplies no facts.
+- Prompt now says alias/collective definitions are not ownership links between
+  those names; use one company reference, do not retag the company as Subsidiary,
+  and do not invent named subsidiaries from an unnamed collective.
+- A specific possible risk must retain its qualification and company connection
+  in the evidence. Do not infer realized impact or relationships from headings.
+- PROMPT_VERSION is p3-alias-evidence-v1. This changes recipe keys, so old files
+  stay on disk but are not silently accepted as the clarified recipe. The next
+  proposed verification remains ONLY chunk-059, not a full-corpus restart.
+- 242 offline tests pass. Test checks prompt rules and unchanged ontology, not
+  actual model compliance. No API calls or new quality scores. Latest rejected
+  raw answer is not recovered retroactively; older answers are separate evidence.
