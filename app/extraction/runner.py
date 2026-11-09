@@ -164,18 +164,18 @@ class RunLimits:
     stop_after_failed_chunks: int = 5
     give_up_after_runs: int = 3          # CONTENT failures in this many separate runs: skip the chunk
     retry_given_up: bool = False         # True: include given-up chunks again (records are kept, never deleted)
-    # Circuit breaker for provider-wide failure: after this many chunks parked
-    # for transient failure IN A ROW, stop calling for the cooldown, then resume.
+    # Eligible failed calls per provider, not parked chunks. Router circuits
+    # cool only that provider; a single-client run must wait for recovery.
     circuit_consecutive_failures: int = 5
     circuit_cooldown_seconds: float = 120.0
 
 
 def find_compatible_valid(results_dir: str, chunk: dict, ontology_fingerprint: str,
-                          current_model: str) -> Optional[dict]:
-    """A valid saved result for the same chunk text and recipe from ANY provider.
+                          current_model: str, approved_models=None) -> Optional[dict]:
+    """A valid saved result for the same chunk text and recipe from a configured approved model.
 
     Work keys include the model name, so each provider's results are saved as
-    separate files and results never mix. But a chunk that ANY provider already
+    separate files and results never mix. But a chunk that an approved configured provider already
     extracted validly under the same chunk text, ontology, schema and prompt is
     done: never redo finished work. Identity is recomputed, not trusted: the
     record must carry a complete identity (model, work_key, ontology
@@ -203,7 +203,10 @@ def find_compatible_valid(results_dir: str, chunk: dict, ontology_fingerprint: s
         if not isinstance(record, dict) or record.get("status") != "valid":
             continue
         model = record.get("model")
-        if not isinstance(model, str) or model == "" or model == current_model:
+        if record.get("provider_used", model.split(":")[0] if isinstance(model, str) else None) != (model.split(":")[0] if isinstance(model, str) else None):
+            continue
+        if (not isinstance(model, str) or model == "" or model == current_model
+                or approved_models is None or model not in approved_models):
             continue
         if record.get("ontology_fingerprint") != ontology_fingerprint:
             continue
@@ -253,6 +256,16 @@ def give_up(saved: Optional[dict], give_up_after_runs: int) -> bool:
     return runs >= give_up_after_runs
 
 
+def measured_token_total(attempts, field):
+    total = 0
+    for attempt in attempts:
+        value = attempt.get(field)
+        if value is None:
+            return None
+        total += value
+    return total
+
+
 def run_extraction(
     chunks: List[dict],
     call_model: Callable[[str], str],
@@ -264,6 +277,7 @@ def run_extraction(
     save: Callable[[str, str, str, dict], None] = save_result,
     clock: Callable[[], float] = time.perf_counter,
     log_event=None,
+    approved_models=None,
 ) -> Dict[str, object]:
     summary: Dict[str, object] = {
         "total_chunks": len(chunks),
@@ -286,7 +300,10 @@ def run_extraction(
     }
     fingerprint = ontology.fingerprint()
     failed_in_a_row = 0
-    transient_in_a_row = 0
+    provider_failures = 0
+    if approved_models is None:
+        approved_models = getattr(call_model, "approved_models", [model_name])
+    circuit_seen = 0
     run_start = clock()
     chunk_times: List[float] = []
 
@@ -310,17 +327,31 @@ def run_extraction(
         return summary
 
     def emit(kind, chunk, **fields):
-        if log_event is None:
-            return
         event = {"event": kind, "chunk_id": chunk["chunk_id"],
                 "document_id": chunk.get("accession"), "section": chunk.get("item_id"),
                 "form": chunk.get("form"), "start": chunk.get("start"), "end": chunk.get("end"),
                 "model": model_name, "prompt_version": PROMPT_VERSION,
                 "schema_version": SCHEMA_VERSION}
         event.update(fields)
-        log_event(event)
+        if kind == "attempt":
+            metrics = event.get("metrics", {})
+            metrics["tokens_in"] = metrics.get("prompt_tokens")
+            metrics["tokens_out"] = metrics.get("completion_tokens")
+            metrics["cost_usd"] = None
+            event["attempt_number"] = event["attempt"]
+            event["latency_ms"] = metrics.get("latency_ms")
+            event["tokens_in"] = metrics["tokens_in"]
+            event["tokens_out"] = metrics["tokens_out"]
+            event["cost_usd"] = None
+            event["provider_used"] = event.get("metrics", {}).get("provider", event["model"].split(":")[0])
+            attempt_records.append(dict(event))
+        if log_event is not None:
+            log_event(event)
 
     for chunk in chunks:
+        begin_chunk = getattr(call_model, "begin_chunk", None)
+        if callable(begin_chunk):
+            begin_chunk()
         chunk_id = chunk["chunk_id"]
         # A router can fail over to another provider mid-run. Name the ACTIVE
         # provider for this chunk's work key, events and saved record, so
@@ -338,7 +369,7 @@ def run_extraction(
             # Done is done, whichever provider did it: a compatible valid
             # result (same chunk text, ontology, schema and prompt, identity
             # recomputed) is never reprocessed on another provider.
-            compatible = find_compatible_valid(results_dir, chunk, fingerprint, model_name)
+            compatible = find_compatible_valid(results_dir, chunk, fingerprint, model_name, approved_models)
             if compatible is not None:
                 accepted_record = compatible
                 accepted_from_model = compatible.get("model")
@@ -359,6 +390,12 @@ def run_extraction(
         prompt = base_prompt
 
         attempt = 0
+        attempts_by_model = {}
+        attempt_records = []
+        provider_budgets = getattr(call_model, "max_attempts", None)
+        total_budget = limits.max_attempts_per_chunk
+        if provider_budgets:
+            total_budget = sum(provider_budgets.values())
         outcome = "failed"
         failure_kind = "content"
         repairs_done = 0
@@ -373,7 +410,7 @@ def run_extraction(
         chunk_start = clock()
         chunk_retry_wait = 0.0
 
-        while attempt < limits.max_attempts_per_chunk:
+        while attempt < total_budget:
             if summary["calls_used"] >= limits.max_calls:
                 summary["stopped_early"] = True
                 summary["stop_reason"] = "call cap reached"
@@ -383,7 +420,21 @@ def run_extraction(
                     chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
                 return finish()
 
+            prepare = getattr(call_model, "prepare_call", None)
+            if callable(prepare):
+                cooldown_wait = prepare()
+                if cooldown_wait > 0:
+                    sleep(cooldown_wait)
+                    chunk_retry_wait += cooldown_wait
+                    summary["retry_wait_seconds"] += cooldown_wait
+                    call_model.finish_cooldown_wait()
+            next_model = getattr(call_model, "model_name", model_name)
+            if provider_budgets and attempts_by_model.get(next_model, 0) >= provider_budgets[next_model]:
+                if call_model.request_failover("provider retry budget exhausted"):
+                    continue
+                break
             attempt = attempt + 1
+            attempts_by_model[next_model] = attempts_by_model.get(next_model, 0) + 1
             summary["calls_used"] = summary["calls_used"] + 1
             # Snapshot the provider BEFORE the call: a router can fail over
             # inside the call, and this attempt was still served by the one
@@ -413,6 +464,23 @@ def run_extraction(
                 metrics.setdefault("error_type", "http_" + str(error.status_code))
                 emit("attempt", chunk, attempt=attempt, status="failed", metrics=metrics,
                     model=attempt_model)
+                if classify_status(error.status_code) == RETRY_LATER:
+                    provider_failures += 1
+                    circuit_events = getattr(call_model, "circuit_events", None)
+                    if circuit_events is not None:
+                        for circuit_event in circuit_events[circuit_seen:]:
+                            emit("circuit_open", chunk, **circuit_event)
+                            summary["circuit_trips"] += 1
+                        circuit_seen = len(circuit_events)
+                    elif provider_failures >= limits.circuit_consecutive_failures:
+                        emit("circuit_open", chunk, model=attempt_model,
+                             consecutive_failures=provider_failures,
+                             cooldown_seconds=limits.circuit_cooldown_seconds)
+                        summary["circuit_trips"] += 1
+                        sleep(limits.circuit_cooldown_seconds)
+                        chunk_retry_wait += limits.circuit_cooldown_seconds
+                        summary["retry_wait_seconds"] += limits.circuit_cooldown_seconds
+                        provider_failures = 0
                 if primary_error_type is None:
                     primary_error_type = "http_" + str(error.status_code)
                 failure_kind = "transient"  # rate limit, quota, network, 5xx: the run's problem, not the chunk's
@@ -424,7 +492,7 @@ def run_extraction(
                         retries=attempt - 1, result_reused=False, reason=summary["stop_reason"],
                         chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
                     return finish()
-                if attempt >= limits.max_attempts_per_chunk:
+                if attempt >= total_budget:
                     break
                 routed_away = len(getattr(call_model, "route_events", [])) > route_events_before
                 if routed_away:
@@ -449,7 +517,16 @@ def run_extraction(
                 summary["retry_wait_seconds"] = round(summary["retry_wait_seconds"] + wait, 3)
                 continue
 
+            provider_failures = 0  # a successful provider response resets its error streak
             is_valid, problems, relationships, entities = validate_extraction(raw_text, chunk, ontology)
+            validated_response = getattr(call_model, "validated_response", None)
+            if callable(validated_response):
+                validated_response(is_valid, repair_exhausted=(not is_valid and repairs_done >= 1))
+                circuit_events = call_model.circuit_events
+                for circuit_event in circuit_events[circuit_seen:]:
+                    emit("circuit_open", chunk, **circuit_event)
+                    summary["circuit_trips"] += 1
+                circuit_seen = len(circuit_events)
             metrics = dict(getattr(call_model, "last_metrics", {}))
             metrics.setdefault("latency_ms", round((clock() - call_start) * 1000, 3))
             validation_status = "invalid"
@@ -488,7 +565,7 @@ def run_extraction(
         # entities and relationships in the model's own shape. Name the provider
         # that produced the FINAL outcome of this chunk: a router may have failed
         # over mid-chunk, and provenance says who actually produced the result.
-        model_name = getattr(call_model, "model_name", model_name)
+        model_name = getattr(call_model, "served_model_name", attempt_model)
         served_work_key = make_work_key(chunk, fingerprint, SCHEMA_VERSION, PROMPT_VERSION, model_name)
         if served_work_key != work_key:
             # A router failed over mid-chunk: this record belongs to the
@@ -513,7 +590,21 @@ def run_extraction(
             new_route_events = getattr(call_model, "route_events", [])[chunk_route_events_before:]
             if len(new_route_events) > 0:
                 fallback_reason = new_route_events[-1].get("reason")
+        provider_used = getattr(call_model, "last_metrics", {}).get("provider", model_name.split(":")[0])
+        for relationship in relationships:
+            relationship["provider"] = provider_used
+            relationship["model"] = model_name
+            relationship["prompt_version"] = PROMPT_VERSION
         record = {
+            "provider_used": provider_used,
+            "attempt_number": attempt,
+            "attempt_records": attempt_records,
+            "tokens_in": measured_token_total(attempt_records, "tokens_in"),
+            "tokens_out": measured_token_total(attempt_records, "tokens_out"),
+            "valid_first_try": outcome == "valid" and attempt == 1,
+            "cost_usd": None,
+            "fallback_reason": fallback_reason,
+            "primary_error_type": primary_error_type,
             "status": outcome,
             "runs": runs_count,
             "failure_kind": failure_kind,
@@ -551,30 +642,14 @@ def run_extraction(
         if outcome == "valid":
             summary["valid"] = summary["valid"] + 1
             failed_in_a_row = 0
-            transient_in_a_row = 0
         elif outcome == "invalid":
             summary["invalid"] = summary["invalid"] + 1
-            transient_in_a_row = 0
         else:
             summary["failed"] = summary["failed"] + 1
             if failure_kind == "transient":
-                # A provider-wide failure (rate limit, quota, network, server
-                # error) is the run's problem, not the chunk's: the chunk is
-                # parked (its transient record stays pending) and the run
-                # continues. After circuit_consecutive_failures parked chunks in
-                # a row, the circuit opens: no calls for the cooldown, then the
-                # run resumes. Rerunning the same command replays parked chunks.
-                transient_in_a_row = transient_in_a_row + 1
+                # Dead-letter parking is independent of provider circuit state.
                 summary["parked_transient"] = summary["parked_transient"] + 1
-                if transient_in_a_row >= limits.circuit_consecutive_failures:
-                    summary["circuit_trips"] = summary["circuit_trips"] + 1
-                    emit("circuit_open", chunk, consecutive_failures=transient_in_a_row,
-                        cooldown_seconds=limits.circuit_cooldown_seconds)
-                    sleep(limits.circuit_cooldown_seconds)
-                    summary["retry_wait_seconds"] = round(summary["retry_wait_seconds"] + limits.circuit_cooldown_seconds, 3)
-                    transient_in_a_row = 0
                 continue
-            transient_in_a_row = 0  # a content failure means the provider responded
             failed_in_a_row = failed_in_a_row + 1  # only CONTENT failures count here
             if failed_in_a_row >= limits.stop_after_failed_chunks:
                 summary["stopped_early"] = True

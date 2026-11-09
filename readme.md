@@ -71,28 +71,38 @@ python scripts/run_extraction.py --provider gemini --fallback-provider groq \
   That flag records your approval of paid usage; it is not a spending limit and does
   not cap dollars.
 - `configs/extraction.yaml` holds the exact model ids, `max_retries` (retries AFTER the
-  first try: 2 means at most 3 attempts per chunk), `timeout_s`, the `fallback_on`
+  first try: 2 means at most 3 attempts per chunk ON EACH provider), `timeout_s`, the `fallback_on`
   causes and the circuit breaker. Precedence: a CLI flag wins over the file, the file
   wins over the built-in defaults. Keys and the call cap stay in `.env`; per-minute
   rate limits stay CLI flags. No value lives in two places.
-- `--fallback-provider` keeps a run working when the primary provider is down:
-  the run continues on the fallback for the rest of the run. Only provider-wide
-  problems (rate limit, quota, server or network failure) can fail over, and a
-  first short failure never does - a per-minute rate limit waits it out on the
-  SAME provider with the normal backoff. The router moves only on a confirmed
-  outage: the provider asked for a wait longer than the wait limit (a daily
-  quota or equivalent long stop), or it failed provider-wide twice in a row
-  (a success resets the count). An answer that is still invalid after ONE repair
-  attempt also moves to the fallback (`schema_invalid_after_repair`): the fallback
-  faces the same prompt, schema and validation, and the record says why it moved
-  (`fallback_reason`). Without a fallback, an invalid chunk keeps repairing on the
-  same provider. A paid fallback is never touched by a transient blip. Setup
-  problems (key, model id, billing) never fail over: the run stops so you can fix
-  them. Each provider passes its own cost and rate-limit gates.
-- Provider-wide failure parks, never loses: a chunk that keeps failing transiently
-  is parked (its record stays pending) and the run CONTINUES with the next chunk.
-  After 5 parked chunks in a row the circuit breaker stops calling for 120 seconds,
-  then resumes. Rerunning the same command replays every parked chunk.
+- `--fallback-provider` uses the same prompt, validator and ontology checks for
+  every provider. A short first 429 waits on that SAME provider with backoff.
+  With `max_retries: 2`, persistent 429/5xx/timeouts use at most 3 calls on the
+  primary before fallback; a requested wait beyond the wait limit can route
+  sooner. One rejected schema repair also routes. Each configured provider has
+  its own retry budget and timeout (2 retries = 3 calls each; at most 6 calls per
+  chunk for a two-provider chain). Setup errors (key/model/billing) stop, never
+  route to paid usage; blocked-key demonstrations are MOCK tests, not live proof.
+- Provider circuits count consecutive eligible failed CALLS per provider, not
+  parked chunks. A schema response counts only when its one repair was rejected.
+  At 5 failures, only that provider opens for 120 seconds. Healthy fallback keeps
+  serving without a global sleep. Later chunks prefer primary while its circuit
+  is closed; after cooldown a half-open primary probe tests recovery. Valid
+  success resets only that provider's streak; failed probes reopen its circuit.
+  If every provider is open, the run waits until the earliest cooldown expires.
+- Exhausted transient chunks are parked with reasons and never count toward
+  content give-up. The run continues and a rerun replays them; files are kept.
+- Cross-provider saved-result reuse is restricted to the CONFIGURED chain's
+  exact provider/model/recipe identities, plus recomputed chunk text hash,
+  ontology, schema/prompt versions and matching work key/filename. An arbitrary
+  valid-shaped model in the results directory is not approved for reuse. A
+  single-provider run approves only its own model identity. Use separate data
+  directories for Gemini-only, OpenAI-only and fallback comparison runs.
+- Every saved relationship includes provider, model and prompt_version. Chunk
+  records also include provider_used, attempt_number, fallback_reason,
+  primary_error_type, valid_first_try and attempt_records. Each attempt includes
+  latency_ms, tokens_in, tokens_out and cost_usd; missing usage/cost stays null.
+  The model response schema is unchanged: provenance is added AFTER validation.
 - Event log per run: `data/extraction_logs/<run_id>.jsonl` (attempts, tokens, latency,
   per-chunk result, run summary, provider per attempt, failovers, circuit openings).
 - The script prints run time, chunks per minute, median and p95 chunk time, and total
@@ -101,7 +111,9 @@ python scripts/run_extraction.py --provider gemini --fallback-provider groq \
   attempts per chunk, first-try valid rate, empty answers, and provider routing
   (failovers, attempts per provider, chunk outcomes per model, fallback rate over
   all processed chunks AND over only the chunks with a route-eligible primary
-  failure, parked chunks, circuit cooldowns).
+  failure, OpenAI-attempted chunks / ALL setup chunks, parked chunks and provider
+  circuit openings). The setup denominator includes skipped/unvisited loaded chunks;
+  benchmarks must start with separate clean results directories.
 - Delivery is at least once: a crash after the model answered but before the save repeats that one call.
 - The evidence-quote check proves the quote appears in the chunk. It does not prove the fact is true.
 - Results from the old relations-only schema stay on disk but are never reused:

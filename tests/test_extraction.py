@@ -290,7 +290,7 @@ def test_done_chunk_is_not_reprocessed_on_another_provider(ontology, tmp_path):
     second = FakeModel([])
     events = []
     summary = run_extraction([make_chunk(1)], second, ontology, "model-b", str(tmp_path),
-                             quick_limits(), sleep, log_event=events.append)
+                             quick_limits(), sleep, log_event=events.append, approved_models=["model-a", "model-b"])
     assert summary["skipped_done"] == 1
     assert summary["calls_used"] == 0
     assert second.calls == []
@@ -385,7 +385,7 @@ def test_new_model_name_accepts_the_compatible_valid_record(ontology, tmp_path):
     other = FakeModel([good_answer(QUOTE)])
     events = []
     summary = run_extraction(chunks, other, ontology, "model-b", str(tmp_path), quick_limits(), sleep,
-                             log_event=events.append)
+                             log_event=events.append, approved_models=["model-a", "model-b"])
     assert len(other.calls) == 0
     assert summary["skipped_done"] == 1
     assert events[0]["status"] == "skipped"
@@ -426,7 +426,7 @@ def test_transient_failures_park_chunks_and_the_run_continues(ontology, tmp_path
     assert summary["failed"] == 3
     assert summary["stopped_early"] is False
     assert summary["parked_transient"] == 3
-    assert summary["circuit_trips"] == 0
+    assert summary["circuit_trips"] == 1
     assert len(model.calls) == 6
 
 
@@ -448,8 +448,8 @@ def test_max_retries_two_means_three_attempts_per_chunk(ontology, tmp_path):
     assert final["retries"] == 2
 
 
-def test_circuit_breaker_cools_down_after_five_parked_chunks(ontology, tmp_path):
-    # After 5 chunks parked for provider-wide failure in a row, the circuit
+def test_single_provider_cools_down_after_five_failed_attempts(ontology, tmp_path):
+    # After 5 failed provider calls in a row, the circuit
     # opens: no calls for the 120 s cooldown, then the run resumes. Nothing is
     # lost: every parked chunk is pending for the next run.
     chunks = [make_chunk(number) for number in range(1, 7)]
@@ -460,16 +460,16 @@ def test_circuit_breaker_cools_down_after_five_parked_chunks(ontology, tmp_path)
                              quick_limits(max_attempts_per_chunk=2), sleep,
                              log_event=events.append)
     assert summary["parked_transient"] == 6
-    assert summary["circuit_trips"] == 1
+    assert summary["circuit_trips"] == 2
     assert summary["stopped_early"] is False
     assert len(model.calls) == 12
-    assert waits.count(120.0) == 1  # the cooldown; the other waits are retry backoff
-    assert len(waits) == 7
+    assert waits.count(120.0) == 2  # the cooldown; the other waits are retry backoff
+    assert len(waits) == 8
     circuit_events = []
     for event in events:
         if event["event"] == "circuit_open":
             circuit_events.append(event)
-    assert len(circuit_events) == 1
+    assert len(circuit_events) == 2
     assert circuit_events[0]["consecutive_failures"] == 5
     assert circuit_events[0]["cooldown_seconds"] == 120.0
     # Replay recovers the parked chunks.
@@ -509,7 +509,7 @@ def test_old_schema_results_are_not_reused_and_stay_on_disk(ontology, tmp_path):
     assert os.path.exists(old_file)       # the old file is left alone
 
 
-def test_saved_record_is_readable_json_with_provenance_once(ontology, tmp_path):
+def test_saved_record_and_every_edge_have_provenance(ontology, tmp_path):
     sleep, _ = no_sleep_recorder()
     run_extraction([make_chunk(1)], FakeModel([good_answer(QUOTE)]), ontology, "m", str(tmp_path), quick_limits(), sleep)
     files = os.listdir(tmp_path)
@@ -519,7 +519,7 @@ def test_saved_record_is_readable_json_with_provenance_once(ontology, tmp_path):
     saved = json.loads(raw)
     assert saved["status"] == "valid"
     assert saved["schema_version"] == SCHEMA_VERSION
-    # Provenance lives once on the record, not copied into every relationship.
+    # Source metadata stays on the record; provider/model/prompt are also on each edge.
     assert saved["filing_accession"] == "0000000000-26-000001"
     assert saved["form_type"] == "10-K"
     assert saved["period"] == "2026-01-31"
@@ -531,5 +531,33 @@ def test_saved_record_is_readable_json_with_provenance_once(ontology, tmp_path):
         "target": "Widget Engine",
         "evidence_quote": QUOTE,
         "confidence": 0.9,
+        "provider": "m",
+        "model": "m",
+        "prompt_version": PROMPT_VERSION,
     }]
     assert "edges" not in saved
+
+
+def test_unconfigured_model_cannot_supply_accepted_skip(ontology, tmp_path):
+    sleep, _ = no_sleep_recorder()
+    run_extraction([make_chunk(1)], FakeModel([good_answer(QUOTE)]), ontology,
+                   "unapproved:old:r", str(tmp_path), quick_limits(), sleep)
+    model = FakeModel([good_answer(QUOTE)])
+    summary = run_extraction([make_chunk(1)], model, ontology, "approved:new:r",
+                             str(tmp_path), quick_limits(), sleep)
+    assert summary["skipped_done"] == 0
+    assert summary["valid"] == 1
+    assert len(model.calls) == 1
+    assert len(list(tmp_path.glob("*.json"))) == 2  # originals preserved
+
+
+def test_changed_recipe_tag_cannot_supply_accepted_skip(ontology, tmp_path):
+    sleep, _ = no_sleep_recorder()
+    run_extraction([make_chunk(1)], FakeModel([good_answer(QUOTE)]), ontology,
+                   "gemini:model:old-recipe", str(tmp_path), quick_limits(), sleep)
+    model = FakeModel([good_answer(QUOTE)])
+    summary = run_extraction([make_chunk(1)], model, ontology, "gemini:model:new-recipe",
+                             str(tmp_path), quick_limits(), sleep,
+                             approved_models=["gemini:model:new-recipe", "openai:other:recipe"])
+    assert summary["skipped_done"] == 0
+    assert len(model.calls) == 1

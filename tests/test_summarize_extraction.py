@@ -243,4 +243,16 @@ def test_fallback_rate_reports_both_denominators(tmp_path):
     assert "Fallback rate over all processed chunks: 1 of 3 (33.3%)" in result.stdout
     assert "Fallback rate over chunks with a route-eligible primary failure: 1 of 2 (50.0%)" in result.stdout
     assert "Chunks parked for provider-wide failure (pending; replay on rerun): 2" in result.stdout
-    assert "Circuit breaker cooldowns taken: 1" in result.stdout
+    assert "Provider circuit openings: 1" in result.stdout
+
+
+def test_openai_rate_denominator_includes_all_setup_chunks(tmp_path):
+    events = [
+        attempt_outcome("valid", provider="openai", served_after_failover=True, chunk_id="c-1"),
+        chunk_final_full("valid", model="openai:gpt-6-luna:tag", chunk_id="c-1"),
+        chunk_final_full("skipped", attempts=0, chunk_id="c-2"),
+        {"event": "run_final", "summary": {"total_chunks": 4}},
+    ]
+    write_log(tmp_path, "run-a.jsonl", events)
+    result = run_tool(tmp_path)
+    assert "OpenAI use rate over all setup chunks: 1 of 4 (25.0%)" in result.stdout

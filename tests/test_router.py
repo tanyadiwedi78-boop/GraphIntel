@@ -112,7 +112,8 @@ def test_repeated_provider_wide_failure_fails_over():
     assert router("prompt") == "answer from fallback"
     assert router.model_name == "groq:model-y:tag"
     assert fallback.last_metrics["served_after_failover"] is True
-    # Failover is one-way for the rest of the run: no probing back.
+    # Within this chunk the confirmed outage stays on fallback. A later
+    # chunk will prefer primary unless its circuit has opened.
     assert router.active_index == 1
 
 
@@ -244,7 +245,7 @@ def test_failover_run_records_each_attempts_provider_and_skips_on_rerun(tmp_path
     rerun_events = []
     rerun = run_extraction([make_chunk(1)], primary_again, ontology, primary_again.model_name,
                            str(tmp_path), quick_limits(), lambda seconds: None,
-                           log_event=rerun_events.append)
+                           log_event=rerun_events.append, approved_models=router.approved_models)
     assert rerun["skipped_done"] == 1
     assert rerun["calls_used"] == 0
     assert primary_again.calls == []
@@ -338,14 +339,14 @@ def test_both_providers_blocked_parks_chunks_and_replay_recovers(tmp_path):
     chunks = [make_chunk(1), make_chunk(2), make_chunk(3)]
     # Chunk 1 fails over to the fallback on its second attempt; chunks 2 and
     # 3 start on the fallback directly. Every call fails provider-wide.
-    primary = FakeClient("gemini:model-x:tag", "gemini", [ProviderError(503)] * 2)
+    primary = FakeClient("gemini:model-x:tag", "gemini", [ProviderError(503)] * 6)
     fallback = FakeClient("openai:model-y:tag", "openai", [ProviderError(503)] * 4)
     router = ProviderRouter([primary, fallback])
     summary = run_extraction(chunks, router, ontology, router.model_name,
                              str(tmp_path), quick_limits(max_attempts_per_chunk=2),
                              lambda seconds: None)
-    assert len(primary.calls) == 2
-    assert len(fallback.calls) == 4
+    assert len(primary.calls) == 4
+    assert len(fallback.calls) == 2
     assert summary["valid"] == 0
     assert summary["failed"] == 3
     assert summary["parked_transient"] == 3
@@ -355,3 +356,215 @@ def test_both_providers_blocked_parks_chunks_and_replay_recovers(tmp_path):
                             str(tmp_path), quick_limits(), lambda seconds: None)
     assert replay["valid"] == 3
     assert replay["parked_transient"] == 0
+
+
+class ManualClock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def opened_primary(recovery):
+    clock = ManualClock()
+    primary = FakeClient("gemini:p:recipe", "gemini", [ProviderError(503)] * 5 + recovery)
+    fallback = FakeClient("openai:f:recipe", "openai", ["fallback"] * 20)
+    router = ProviderRouter([primary, fallback], clock=clock)
+    for number in range(5):
+        router.begin_chunk()
+        with pytest.raises(ProviderError):
+            router("prompt")
+    return router, primary, fallback, clock
+
+
+def test_provider_circuit_counts_failed_calls_not_parked_chunks():
+    router, primary, fallback, clock = opened_primary(["recovered"])
+    assert len(primary.calls) == 5
+    assert router.failures == [5, 0]
+    assert len(router.circuit_events) == 1
+    assert router.circuit_events[0]["consecutive_failures"] == 5
+    assert router.open_until[0] == 220.0
+    assert router.open_until[1] == 0.0
+
+
+def test_open_primary_is_skipped_while_fallback_serves_without_sleep():
+    router, primary, fallback, clock = opened_primary(["recovered"])
+    for number in range(3):
+        router.begin_chunk()
+        assert router.prepare_call() == 0
+        assert router("prompt") == "fallback"
+    assert len(primary.calls) == 5
+    assert len(fallback.calls) == 3
+    assert router.failures[0] == 5  # fallback success cannot reset primary
+    clock.advance(119.999)
+    router.begin_chunk()
+    assert router("prompt") == "fallback"
+    assert len(primary.calls) == 5
+
+
+def test_half_open_primary_returns_at_exact_cooldown_and_success_resets():
+    router, primary, fallback, clock = opened_primary(["recovered"])
+    clock.advance(120)
+    router.begin_chunk()
+    assert router.model_name == primary.model_name
+    assert router("prompt") == "recovered"
+    assert router.failures[0] == 0
+    assert router.open_until[0] == 0
+    assert router.half_open[0] is False
+
+
+def test_failed_half_open_probe_reopens_only_primary():
+    router, primary, fallback, clock = opened_primary([ProviderError(503)])
+    clock.advance(120)
+    router.prepare_call()
+    with pytest.raises(ProviderError):
+        router("prompt")
+    assert router.open_until[0] == 340.0
+    assert router.open_until[1] == 0
+    assert router("prompt") == "fallback"
+    assert len(router.circuit_events) == 2
+
+
+def test_fallback_circuit_does_not_clear_or_open_primary():
+    clock = ManualClock()
+    primary = FakeClient("gemini:p:r", "gemini", ["primary"])
+    fallback = FakeClient("openai:f:r", "openai", [ProviderError(503)] * 5)
+    router = ProviderRouter([primary, fallback], clock=clock)
+    router.active_index = 1
+    for number in range(5):
+        with pytest.raises(ProviderError):
+            router("prompt")
+    assert router.open_until == [0.0, 220.0]
+    router.begin_chunk()
+    assert router("prompt") == "primary"
+
+
+def test_both_circuits_open_awaits_earliest_only():
+    clock = ManualClock()
+    primary = FakeClient("gemini:p:r", "gemini", ["recovered"])
+    fallback = FakeClient("openai:f:r", "openai", [])
+    router = ProviderRouter([primary, fallback], clock=clock)
+    router.open_until = [220.0, 240.0]
+    assert router.prepare_call() == 120.0
+    assert primary.calls == fallback.calls == []
+    clock.advance(120)
+    assert router.prepare_call() == 0
+    assert router("prompt") == "recovered"
+
+
+def test_runner_serves_fallback_through_primary_cooldown_no_global_sleep(tmp_path):
+    clock = ManualClock()
+    primary = FakeClient("gemini:p:r", "gemini", [ProviderError(503)] * 5)
+    fallback = FakeClient("openai:f:r", "openai", [good_answer(QUOTE)] * 8)
+    router = ProviderRouter([primary, fallback], clock=clock)
+    waits = []
+    events = []
+    summary = run_extraction([make_chunk(i) for i in range(8)], router,
+                            load_ontology("configs/ontology.json"), router.model_name,
+                            str(tmp_path), quick_limits(), waits.append,
+                            clock=clock, log_event=events.append)
+    assert summary["valid"] == 8
+    assert len(primary.calls) == 5
+    assert len(fallback.calls) == 8
+    assert summary["circuit_trips"] == 1
+    assert 120.0 not in waits
+    assert summary["parked_transient"] == 0
+    for path in tmp_path.glob("*.json"):
+        record = json.loads(path.read_text())
+        assert record["model"] == fallback.model_name
+
+
+def test_each_provider_gets_its_own_retry_budget_and_saved_attempt_aliases(tmp_path):
+    primary = FakeClient("gemini:p:r", "gemini", [ProviderError(503)] * 3)
+    fallback = FakeClient("openai:f:r", "openai",
+                          [ProviderError(503), ProviderError(503), good_answer(QUOTE)])
+    router = ProviderRouter([primary, fallback], failover_after=3,
+                            max_attempts={primary.model_name: 3, fallback.model_name: 3})
+    summary = run_extraction([make_chunk(1)], router, load_ontology("configs/ontology.json"),
+                            router.model_name, str(tmp_path), quick_limits(max_attempts_per_chunk=3),
+                            lambda seconds: None)
+    assert summary["valid"] == 1
+    assert len(primary.calls) == len(fallback.calls) == 3
+    record = json.loads(next(tmp_path.glob("*.json")).read_text())
+    assert record["attempt_number"] == 6
+    assert record["provider_used"] == "openai"
+    assert record["valid_first_try"] is False
+    assert len(record["attempt_records"]) == 6
+    assert record["cost_usd"] is None
+    assert record["tokens_in"] is None  # unknown is never fabricated as zero
+    assert record["tokens_out"] is None
+    for number, event in enumerate(record["attempt_records"], 1):
+        assert event["attempt_number"] == number
+        assert event["cost_usd"] is None
+        assert "latency_ms" in event
+        assert "tokens_in" in event
+        assert "tokens_out" in event
+    for edge in record["relationships"]:
+        assert edge["provider"] == "openai"
+        assert edge["model"] == fallback.model_name
+        assert edge["prompt_version"] == record["prompt_version"]
+
+
+def test_configured_fallback_cause_can_disable_schema_route():
+    primary = FakeClient("gemini:p:r", "gemini", [])
+    fallback = FakeClient("openai:f:r", "openai", [])
+    router = ProviderRouter([primary, fallback], fallback_on=["rate_limit"])
+    assert router.request_failover("schema_invalid_after_repair") is False
+    assert router.active_index == 0
+
+
+def test_configured_fallback_cause_can_disable_server_error_route():
+    primary = FakeClient("gemini:p:r", "gemini", [ProviderError(503)] * 2)
+    fallback = FakeClient("openai:f:r", "openai", [])
+    router = ProviderRouter([primary, fallback], fallback_on=["rate_limit"])
+    for number in range(2):
+        with pytest.raises(ProviderError):
+            router("prompt")
+    assert router.route_events == []
+    assert fallback.calls == []
+
+
+def test_twenty_chunks_both_unavailable_park_and_replay_without_loss(tmp_path):
+    clock = ManualClock()
+    primary = FakeClient("gemini:p:r", "gemini", [ProviderError(503)] * 100)
+    fallback = FakeClient("openai:f:r", "openai", [ProviderError(503)] * 100)
+    router = ProviderRouter([primary, fallback], failover_after=3, clock=clock,
+                            max_attempts={primary.model_name: 3, fallback.model_name: 3})
+    chunks = [make_chunk(i) for i in range(20)]
+    summary = run_extraction(chunks, router, load_ontology("configs/ontology.json"),
+                            router.model_name, str(tmp_path), quick_limits(max_calls=200),
+                            clock.advance, clock=clock)
+    assert summary["parked_transient"] == 20
+    assert summary["stopped_early"] is False
+    assert summary["calls_used"] <= 120
+    assert len(list(tmp_path.glob("*.json"))) >= 20
+    healthy = FakeClient("gemini:p:r", "gemini", [good_answer(QUOTE)] * 20)
+    replay = run_extraction(chunks, healthy, load_ontology("configs/ontology.json"),
+                           healthy.model_name, str(tmp_path), quick_limits(), clock.advance)
+    assert replay["valid"] == 20
+    assert replay["parked_transient"] == 0
+
+
+def test_rejected_repairs_are_eligible_schema_failures_and_valid_resets():
+    clock = ManualClock()
+    primary = FakeClient("gemini:p:r", "gemini", ["bad"] * 10 + ["good"])
+    fallback = FakeClient("openai:f:r", "openai", [])
+    router = ProviderRouter([primary, fallback], clock=clock)
+    for number in range(5):
+        router.begin_chunk()
+        router("base")
+        router.validated_response(False)
+        router("repair")
+        router.validated_response(False, repair_exhausted=True)
+        router.request_failover("schema_invalid_after_repair")
+    assert router.failures[0] == 5
+    assert router.open_until[0] == 220
+    clock.advance(120)
+    router.begin_chunk()
+    router("base")
+    router.validated_response(True)
+    assert router.failures[0] == 0

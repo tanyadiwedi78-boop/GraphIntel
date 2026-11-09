@@ -96,6 +96,8 @@ def main() -> int:
     fallback_chunks = set()           # run_id:chunk_id served after a failover
     eligible_failure_chunks = set()   # run_id:chunk_id with a route-eligible primary failure
     processed_chunk_keys = set()      # run_id:chunk_id with a valid/invalid/failed outcome
+    openai_chunks = set()
+    setup_chunks_total = 0
     parked_total = 0
     circuit_trips_total = 0
     doc_attempts = {}
@@ -110,6 +112,8 @@ def main() -> int:
         run_count = run_count + 1
         run_id = os.path.basename(path)
         run_status = {}
+        run_chunk_keys = set()
+        declared_chunk_count = None
         run_elapsed = None
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -121,6 +125,8 @@ def main() -> int:
                 if kind == "attempt":
                     attempt_count = attempt_count + 1
                     metrics = event.get("metrics", {})
+                    if metrics.get("provider") == "openai":
+                        openai_chunks.add(str(event.get("run_id")) + ":" + str(event.get("chunk_id")))
                     add_tokens(totals, metrics)
                     outcome = str(event.get("status"))
                     attempt_status[outcome] = attempt_status.get(outcome, 0) + 1
@@ -157,6 +163,7 @@ def main() -> int:
                     if isinstance(basis, str) and basis != "":
                         cost_basis_seen.add(basis)
                 elif kind == "chunk_final":
+                    run_chunk_keys.add(str(event.get("chunk_id")))
                     status = str(event.get("status"))
                     status_counts[status] = status_counts.get(status, 0) + 1
                     run_status[status] = run_status.get(status, 0) + 1
@@ -191,6 +198,7 @@ def main() -> int:
                         retry_wait_total = retry_wait_total + waited
                 elif kind == "run_final":
                     summary = event.get("summary", {})
+                    declared_chunk_count = summary.get("total_chunks")
                     elapsed = summary.get("elapsed_seconds")
                     if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
                         run_elapsed = elapsed
@@ -201,6 +209,10 @@ def main() -> int:
                     trips = summary.get("circuit_trips")
                     if isinstance(trips, int) and not isinstance(trips, bool):
                         circuit_trips_total = circuit_trips_total + trips
+        if isinstance(declared_chunk_count, int) and declared_chunk_count >= 0:
+            setup_chunks_total += declared_chunk_count
+        else:
+            setup_chunks_total += len(run_chunk_keys)
         line_text = "run " + run_id + ":"
         for status in sorted(run_status.keys()):
             line_text = line_text + " " + status + "=" + str(run_status[status])
@@ -300,6 +312,9 @@ def main() -> int:
         # Her decision rule uses chunks that used the fallback / all chunks; the
         # second rate shows the same count over only the chunks where the
         # primary had a route-eligible failure. Report both, change neither.
+        if setup_chunks_total > 0:
+            share = round(100.0 * len(openai_chunks) / setup_chunks_total, 1)
+            print(f"  OpenAI use rate over all setup chunks: {len(openai_chunks)} of {setup_chunks_total} ({share}%)")
         print(f"  Chunks served by a fallback provider: {len(fallback_chunks)}")
         if len(processed_chunk_keys) > 0:
             share = round(100.0 * len(fallback_chunks) / len(processed_chunk_keys), 1)
@@ -308,7 +323,7 @@ def main() -> int:
             share = round(100.0 * len(fallback_chunks) / len(eligible_failure_chunks), 1)
             print(f"  Fallback rate over chunks with a route-eligible primary failure: {len(fallback_chunks)} of {len(eligible_failure_chunks)} ({share}%)")
         print(f"  Chunks parked for provider-wide failure (pending; replay on rerun): {parked_total}")
-        print(f"  Circuit breaker cooldowns taken: {circuit_trips_total}")
+        print(f"  Provider circuit openings: {circuit_trips_total}")
         for model in sorted(model_outcomes.keys()):
             outcomes = model_outcomes[model]
             line_text = "  Chunks by model " + model + ":"

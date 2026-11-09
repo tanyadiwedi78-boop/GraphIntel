@@ -114,7 +114,7 @@ def configured_positive_number(provider_entries, provider, extraction_config, ke
 
 
 def configured_max_retries(provider_entries, provider, extraction_config):
-    """Retries AFTER the first try for the primary provider (default 2, so at
+    """Retries AFTER the first try for one provider (default 2, so at
     most 3 attempts per chunk). Returns (value, error_text)."""
     entry = provider_entries.get(provider) or {}
     value = entry.get("max_retries", extraction_config.get("max_retries", 2))
@@ -379,7 +379,7 @@ def main() -> int:
                        circuit_consecutive_failures=circuit_failures,
                        circuit_cooldown_seconds=float(circuit_cooldown))
     print(f"Settings: at most {max_retries + 1} attempts per chunk ({max_retries} retries), "
-          f"circuit breaker {circuit_failures} parked chunks in a row / {circuit_cooldown}s cooldown, "
+          f"circuit breaker {circuit_failures} consecutive eligible failed calls per provider / {circuit_cooldown}s cooldown, "
           f"fallback on {fallback_on} (from {args.config}).")
 
     providers = [args.provider]
@@ -390,6 +390,7 @@ def main() -> int:
         providers.append(args.fallback_provider)
 
     clients = []
+    provider_budgets = {}
     position = 0
     for provider in providers:
         if position == 0:
@@ -414,18 +415,27 @@ def main() -> int:
         except ValueError as error:
             print(f"{PROVIDER_NAMES[provider]} setup problem: {error}")
             return 1
+        retries, retries_error = configured_max_retries(provider_entries, provider, extraction_config)
+        if retries_error is not None:
+            print(retries_error)
+            return 1
+        provider_budgets[one_client.model_name] = retries + 1
         clients.append(one_client)
         position = position + 1
 
     if len(clients) == 1:
         client = clients[0]
     else:
-        client = ProviderRouter(clients)
+        client = ProviderRouter(clients, failover_after=max_retries + 1,
+                                consecutive_failures=circuit_failures,
+                                cooldown_seconds=float(circuit_cooldown),
+                                max_attempts=provider_budgets, fallback_on=fallback_on)
         primary_name = PROVIDER_NAMES[providers[0]]
         fallback_name = PROVIDER_NAMES[providers[1]]
         print(f"Fallback route: if {primary_name} hits a provider-wide problem (rate limit, quota,")
         print(f"server or network failure) or stays invalid after one repair, the run continues on")
-        print(f"{fallback_name} for the rest of the run, with the same prompt, schema and validation.")
+        print(f"{fallback_name}, with the same prompt, schema and validation.")
+        print("Primary is retried on later chunks unless its circuit is open; after cooldown it is probed again.")
         print("Setup problems (key, model id, billing) never fail over: the run stops")
         print("so you can fix them. Saved results and event logs always name the provider that")
         print("actually produced each answer.")

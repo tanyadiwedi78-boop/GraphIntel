@@ -589,8 +589,8 @@ def test_persistent_server_error_parks_chunks_and_continues(tmp_path):
     # A provider-wide failure (persistent 503: network or server) parks the
     # chunk and the run CONTINUES: the parked chunk's record stays pending
     # (transient, runs not counted) and later chunks are still visited, so a
-    # rerun replays everything parked. The circuit breaker (5 parked chunks in
-    # a row) is not reached here, so no cooldown happens.
+    # rerun replays everything parked. Five consecutive failed calls trip
+    # the single-provider circuit once during these nine calls.
     ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
     quote = "develops the Widget Engine"
     chunks = []
@@ -604,7 +604,7 @@ def test_persistent_server_error_parks_chunks_and_continues(tmp_path):
     assert summary["calls_used"] == 9  # 3 chunks, 3 attempts each
     assert summary["stopped_early"] is False
     assert summary["parked_transient"] == 3
-    assert summary["circuit_trips"] == 0
+    assert summary["circuit_trips"] == 1
     assert len(model.calls) == 9  # every chunk was visited
     saved_files = sorted(os.listdir(results_dir))
     assert len(saved_files) == 3  # all three chunks parked: pending, transient

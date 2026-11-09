@@ -10,8 +10,10 @@
 # chunk on a provider. fallback_on lists the failure causes allowed to move
 # the run to the fallback provider; schema_invalid_after_repair means the
 # answer failed validation once, was repaired once, and failed again.
-# circuit_breaker: after consecutive_failures chunks parked for provider-wide
-# failure in a row, the run stops calling for cooldown_s seconds, then resumes.
+# circuit_breaker: consecutive eligible failed calls are counted per provider.
+# Only that provider opens for cooldown_s; healthy fallback can keep serving.
+# After cooldown the primary is half-open and tested again. Valid success resets
+# only its own streak. A rejected schema repair counts as one eligible failure.
 extraction:
   providers:
     - {name: gemini, model: gemini-3.5-flash-lite, max_retries: 2, timeout_s: 60}

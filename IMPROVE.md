@@ -172,3 +172,36 @@ model ids in a config file. What changed in code, each with tests:
   without identity not accepted, mismatched work key not accepted), CLI gate and
   summarizer tests. 214 offline tests pass on Linux (fake HTTP servers and fake clients
   only; no network, no real keys). No live OpenAI or fallback call has been made.
+
+## 2026-11-09 (follow-up) - provider-scoped breaker and configured reuse
+
+This supersedes the earlier parked-chunk/global-sleep breaker and one-way-route
+notes above. No files or results were deleted; the same extraction flow is extended.
+- ProviderRouter now counts eligible failed calls separately per provider, opens
+  only the failing provider after 5, skips it for 120 seconds while healthy
+  fallback serves, and half-opens primary on cooldown expiry. A valid success
+  resets only its own streak; failed probes reopen. New chunks prefer primary
+  while closed. A rejected schema repair counts once, not every invalid draft.
+  If both circuits are open, only the earliest remaining cooldown is awaited.
+- Reuse accepts only the configured chain's exact model identities (including
+  provider and recipe tag), then checks all existing fingerprint/version/key
+  fields. Single-provider runs do not approve arbitrary other models. Separate
+  results directories remain required for provider-comparison benchmarks.
+- The CLI reads EACH provider's max_retries and timeout. Two retries means three
+  calls on each provider, not three shared calls across the chain; two configured
+  providers allow at most six calls/chunk, still under the whole-run call cap.
+- Saved relationships now include provider/model/prompt_version AFTER the same
+  existing validator. Chunk records preserve attempt records and requested field
+  aliases. Existing review/scoring reads named relationship fields and tolerates
+  this additive metadata (full suite passes). No entity/ontology semantics changed.
+- Summarizer explicitly reports OpenAI-attempted chunks / all loaded setup chunks
+  (including skipped/unvisited chunks), alongside the older generic fallback and
+  eligible-failure rates. Unknown token counts/costs stay null, never fake zero.
+- 240 offline tests pass. Added manual-clock checks for exact expiry, failed
+  half-open, provider-local reset, fallback without global pause, both-circuit
+  unavailability, 20 parked chunks + replay, configured-model rejection,
+  per-provider retry budgets, edge provenance/record aliases and all-setup denominator.
+- No live OpenAI or paid fallback call. No live 200-chunk benchmark, reviewed edge
+  precision/recall/agreement or full-corpus completion. Paid approval + enforceable
+  spend cap, laptop verification and reviewed labels remain required. Existing
+  explicit validator is shared across providers; it is not a Pydantic validator.
