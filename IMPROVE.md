@@ -124,6 +124,46 @@ Running list of changes, newest first.
   setup problems, cost-gate blocks), attempts per fresh chunk, first-try valid rate,
   empty answers, and provider routing (attempts per provider, failovers, attempts served
   after failover, chunk outcomes per model).
+## 2026-11-09 (later) - her fallback spec aligned: repair-then-route, park-and-continue, circuit breaker, config file
+
+Her routing/eval spec (17:53) changed three behaviors and asked for the exact
+model ids in a config file. What changed in code, each with tests:
+- `schema_invalid_after_repair` is now failover-eligible: an answer that fails
+  validation, then fails its ONE repair attempt, moves the chunk to the fallback
+  (same prompt, schema and validation there). Without a fallback the chunk keeps
+  repairing as before. Cut-off answers (ChunkFailedError) still never route.
+  Records and chunk_final events now carry `fallback_reason` and
+  `primary_error_type`.
+- Transient failures park, never stop the run: the chunk's record stays pending
+  (transient, never counts toward give-up) and the run continues. After 5 parked
+  chunks in a row the circuit breaker stops calling for 120 s, then resumes
+  (`circuit_open` event; both numbers from config). A rerun replays every parked
+  chunk. This supersedes the old stop-on-transient behavior; the two old tests
+  became park-and-continue tests. Setup problems (401/403/other 4xx) still stop
+  the run immediately and never route - her blocked-key failure test stays a
+  MOCK test: a real bad key never silently spends on a paid fallback.
+- `configs/extraction.yaml` (new): exact model ids (gemini-3.5-flash-lite,
+  gpt-6-luna), `max_retries: 2` (retries AFTER the first try = at most 3
+  attempts; the runner's `max_attempts_per_chunk` = max_retries + 1),
+  `timeout_s: 60` (now actually passed to every client), `fallback_on`,
+  `circuit_breaker`. Precedence: CLI flag > this file > built-in default. Keys
+  and the call cap stay in `.env`; per-minute limits stay CLI flags - no value
+  lives in two places. Unknown fallback causes and bad values are rejected.
+- `scripts/summarize_extraction.py`: the fallback rate is printed with BOTH
+  denominators - over all processed chunks (her decision-rule shape) and over
+  only chunks with a route-eligible primary failure - plus parked-chunk and
+  circuit-cooldown totals. Her <=10% criterion is reported, not reinterpreted.
+- Tests: 225 pass. New: repair-then-route attempt accounting (1 base + 1 repair
+  on the primary, then the fallback's first try with the same base prompt),
+  no-fallback keeps repairing, both-providers-blocked parks and replay recovers,
+  circuit trips once at 5 parked chunks with exactly one 120 s cooldown,
+  max_retries 2 = 3 attempts exactly, transient park-and-continue, config
+  supplies the OpenAI model id, unknown fallback cause and missing config file
+  rejected, fallback-rate denominators. Still offline only: no live OpenAI or
+  fallback call has been made; paid approval and a spend limit are still open.
+
+## 2026-11-09 - multi-provider extraction: OpenAI adapter, fallback routing, reliability metrics
+
 - Tests: `tests/test_openai_client.py`, `tests/test_router.py` (first short 429 stays
   same-provider, repeated failure routes, long requested wait routes at once, success
   resets the count, setup and content failures never route, mid-chunk failover saves

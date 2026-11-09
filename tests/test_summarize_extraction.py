@@ -131,7 +131,7 @@ def test_cost_is_reported_unknown_never_zero(tmp_path):
 
 
 def attempt_outcome(status, provider="gemini", error_type=None, failover_to=None,
-                    served_after_failover=False):
+                    served_after_failover=False, chunk_id="c-1"):
     metrics = {"prompt_tokens": None, "completion_tokens": None, "thought_tokens": None,
                "cached_tokens": None, "paced_wait_seconds": 0.0,
                "cost_basis": "assumed_free_unverified", "estimated_cost_usd": None,
@@ -140,11 +140,13 @@ def attempt_outcome(status, provider="gemini", error_type=None, failover_to=None
         metrics["failover_to"] = failover_to
     if served_after_failover:
         metrics["served_after_failover"] = True
-    return {"run_id": "run-x", "event": "attempt", "status": status, "metrics": metrics}
+    return {"run_id": "run-x", "event": "attempt", "status": status, "chunk_id": chunk_id,
+            "metrics": metrics}
 
 
-def chunk_final_full(status, attempts=1, model="gemini:m:t", valid_first_try=None, empty=None):
-    event = {"run_id": "run-x", "event": "chunk_final", "chunk_id": "c-1", "status": status,
+def chunk_final_full(status, attempts=1, model="gemini:m:t", valid_first_try=None, empty=None,
+                     chunk_id="c-1"):
+    event = {"run_id": "run-x", "event": "chunk_final", "chunk_id": chunk_id, "status": status,
              "attempts": attempts, "model": model}
     if valid_first_try is not None:
         event["valid_first_try"] = valid_first_try
@@ -214,3 +216,31 @@ def test_retry_wait_is_summed(tmp_path):
     result = run_tool(tmp_path)
     assert result.returncode == 0, result.stderr
     assert "Retry backoff wait total: 6.0 s" in result.stdout
+
+
+def test_fallback_rate_reports_both_denominators(tmp_path):
+    # Her decision rule is fallback chunks / all chunks; the second rate keeps
+    # the same count over only chunks where the primary failed route-eligibly.
+    write_log(tmp_path, "run-a.jsonl", [
+        # c-1: primary rate-limited, failover, fallback serves the chunk valid.
+        attempt_outcome("failed", provider="gemini", error_type="http_429",
+                        failover_to="openai:gpt-6-luna:tag", chunk_id="c-1"),
+        attempt_outcome("valid", provider="openai", served_after_failover=True, chunk_id="c-1"),
+        chunk_final_full("valid", attempts=2, model="openai:gpt-6-luna:tag", chunk_id="c-1"),
+        # c-2: clean on the primary, no failure at all.
+        attempt_outcome("valid", provider="gemini", chunk_id="c-2"),
+        chunk_final_full("valid", chunk_id="c-2"),
+        # c-3: a route-eligible primary failure, but no fallback was configured.
+        attempt_outcome("failed", provider="gemini", error_type="http_503", chunk_id="c-3"),
+        attempt_outcome("valid", provider="gemini", chunk_id="c-3"),
+        chunk_final_full("valid", attempts=2, chunk_id="c-3"),
+        {"run_id": "run-x", "event": "run_final",
+         "summary": {"elapsed_seconds": 10.0, "parked_transient": 2, "circuit_trips": 1}},
+    ])
+    result = run_tool(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "Chunks served by a fallback provider: 1" in result.stdout
+    assert "Fallback rate over all processed chunks: 1 of 3 (33.3%)" in result.stdout
+    assert "Fallback rate over chunks with a route-eligible primary failure: 1 of 2 (50.0%)" in result.stdout
+    assert "Chunks parked for provider-wide failure (pending; replay on rerun): 2" in result.stdout
+    assert "Circuit breaker cooldowns taken: 1" in result.stdout

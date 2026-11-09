@@ -66,9 +66,15 @@ python scripts/run_extraction.py --provider gemini --fallback-provider groq \
   account has NO paid plan or billing linked), and your own RPM/TPM limits.
   Cost is reported as unknown, never $0.
 - OpenAI (`--provider openai`, or `--fallback-provider openai`) has no free tier: it also
-  needs `--openai-model` (the exact model id, this build invents no model id) and
-  `--openai-allow-paid`. That flag records your approval of paid usage; it is not a
-  spending limit and does not cap dollars.
+  needs the exact model id (`--openai-model`, or the openai entry in
+  `configs/extraction.yaml` - this build invents no model id) and `--openai-allow-paid`.
+  That flag records your approval of paid usage; it is not a spending limit and does
+  not cap dollars.
+- `configs/extraction.yaml` holds the exact model ids, `max_retries` (retries AFTER the
+  first try: 2 means at most 3 attempts per chunk), `timeout_s`, the `fallback_on`
+  causes and the circuit breaker. Precedence: a CLI flag wins over the file, the file
+  wins over the built-in defaults. Keys and the call cap stay in `.env`; per-minute
+  rate limits stay CLI flags. No value lives in two places.
 - `--fallback-provider` keeps a run working when the primary provider is down:
   the run continues on the fallback for the rest of the run. Only provider-wide
   problems (rate limit, quota, server or network failure) can fail over, and a
@@ -76,16 +82,26 @@ python scripts/run_extraction.py --provider gemini --fallback-provider groq \
   SAME provider with the normal backoff. The router moves only on a confirmed
   outage: the provider asked for a wait longer than the wait limit (a daily
   quota or equivalent long stop), or it failed provider-wide twice in a row
-  (a success resets the count). A paid fallback is never touched by a transient
-  blip. Setup problems (key, model id, billing) never fail over: the run stops
-  so you can fix them. Each provider passes its own cost and rate-limit gates.
+  (a success resets the count). An answer that is still invalid after ONE repair
+  attempt also moves to the fallback (`schema_invalid_after_repair`): the fallback
+  faces the same prompt, schema and validation, and the record says why it moved
+  (`fallback_reason`). Without a fallback, an invalid chunk keeps repairing on the
+  same provider. A paid fallback is never touched by a transient blip. Setup
+  problems (key, model id, billing) never fail over: the run stops so you can fix
+  them. Each provider passes its own cost and rate-limit gates.
+- Provider-wide failure parks, never loses: a chunk that keeps failing transiently
+  is parked (its record stays pending) and the run CONTINUES with the next chunk.
+  After 5 parked chunks in a row the circuit breaker stops calling for 120 seconds,
+  then resumes. Rerunning the same command replays every parked chunk.
 - Event log per run: `data/extraction_logs/<run_id>.jsonl` (attempts, tokens, latency,
-  per-chunk result, run summary, provider per attempt, failovers).
+  per-chunk result, run summary, provider per attempt, failovers, circuit openings).
 - The script prints run time, chunks per minute, median and p95 chunk time, and total
   retry wait. `scripts/summarize_extraction.py` adds per-attempt API reliability
   (validation pass, content rejections, transient failures, cut-offs, setup problems),
   attempts per chunk, first-try valid rate, empty answers, and provider routing
-  (failovers, attempts per provider, chunk outcomes per model).
+  (failovers, attempts per provider, chunk outcomes per model, fallback rate over
+  all processed chunks AND over only the chunks with a route-eligible primary
+  failure, parked chunks, circuit cooldowns).
 - Delivery is at least once: a crash after the model answered but before the save repeats that one call.
 - The evidence-quote check proves the quote appears in the chunk. It does not prove the fact is true.
 - Results from the old relations-only schema stay on disk but are never reused:

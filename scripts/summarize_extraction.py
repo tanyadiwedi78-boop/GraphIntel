@@ -22,6 +22,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import ConfigError, load_settings
+from app.extraction.client import RETRY_LATER, classify_status
+
+
+def route_eligible_error(error_type) -> bool:
+    """True when a failed attempt's error type is provider-wide (the set the
+    router may fail over on): rate limit, timeout, server or network failure."""
+    if error_type == "transport_or_timeout":
+        return True
+    if isinstance(error_type, str) and error_type.startswith("http_"):
+        try:
+            code = int(error_type[5:])
+        except ValueError:
+            return False
+        return classify_status(code) == RETRY_LATER
+    return False
 
 
 def median_and_p95(values: list):
@@ -78,6 +93,11 @@ def main() -> int:
     elapsed_total = 0.0
     attempt_count = 0
     cost_basis_seen = set()
+    fallback_chunks = set()           # run_id:chunk_id served after a failover
+    eligible_failure_chunks = set()   # run_id:chunk_id with a route-eligible primary failure
+    processed_chunk_keys = set()      # run_id:chunk_id with a valid/invalid/failed outcome
+    parked_total = 0
+    circuit_trips_total = 0
     doc_attempts = {}
     doc_status = {}
     doc_seconds = {}
@@ -107,15 +127,20 @@ def main() -> int:
                     provider = metrics.get("provider")
                     if isinstance(provider, str) and provider != "":
                         attempt_providers[provider] = attempt_providers.get(provider, 0) + 1
+                    chunk_key = str(event.get("run_id")) + ":" + str(event.get("chunk_id"))
                     if metrics.get("failover_to"):
                         failover_count = failover_count + 1
+                        eligible_failure_chunks.add(chunk_key)
                     if metrics.get("served_after_failover"):
                         fallback_served = fallback_served + 1
+                        fallback_chunks.add(chunk_key)
                     if outcome == "failed":
                         error_type = metrics.get("error_type")
                         if not isinstance(error_type, str) or error_type == "":
                             error_type = "unknown"
                         attempt_errors[error_type] = attempt_errors.get(error_type, 0) + 1
+                        if route_eligible_error(error_type):
+                            eligible_failure_chunks.add(chunk_key)
                     doc = event.get("document_id")
                     if isinstance(doc, str) and doc != "":
                         doc_attempts[doc] = doc_attempts.get(doc, 0) + 1
@@ -136,6 +161,7 @@ def main() -> int:
                     status_counts[status] = status_counts.get(status, 0) + 1
                     run_status[status] = run_status.get(status, 0) + 1
                     if status in ("valid", "invalid", "failed"):
+                        processed_chunk_keys.add(str(event.get("run_id")) + ":" + str(event.get("chunk_id")))
                         n_attempts = event.get("attempts")
                         if isinstance(n_attempts, int) and not isinstance(n_attempts, bool) and n_attempts > 0:
                             chunk_attempt_counts[n_attempts] = chunk_attempt_counts.get(n_attempts, 0) + 1
@@ -169,6 +195,12 @@ def main() -> int:
                     if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
                         run_elapsed = elapsed
                         elapsed_total = elapsed_total + elapsed
+                    parked = summary.get("parked_transient")
+                    if isinstance(parked, int) and not isinstance(parked, bool):
+                        parked_total = parked_total + parked
+                    trips = summary.get("circuit_trips")
+                    if isinstance(trips, int) and not isinstance(trips, bool):
+                        circuit_trips_total = circuit_trips_total + trips
         line_text = "run " + run_id + ":"
         for status in sorted(run_status.keys()):
             line_text = line_text + " " + status + "=" + str(run_status[status])
@@ -265,6 +297,18 @@ def main() -> int:
                 print(f"  Attempts by provider: {provider}: {attempt_providers[provider]}")
         print(f"  Failovers to a fallback provider (route-eligible provider failures): {failover_count}")
         print(f"  Attempts served after failover: {fallback_served}")
+        # Her decision rule uses chunks that used the fallback / all chunks; the
+        # second rate shows the same count over only the chunks where the
+        # primary had a route-eligible failure. Report both, change neither.
+        print(f"  Chunks served by a fallback provider: {len(fallback_chunks)}")
+        if len(processed_chunk_keys) > 0:
+            share = round(100.0 * len(fallback_chunks) / len(processed_chunk_keys), 1)
+            print(f"  Fallback rate over all processed chunks: {len(fallback_chunks)} of {len(processed_chunk_keys)} ({share}%)")
+        if len(eligible_failure_chunks) > 0:
+            share = round(100.0 * len(fallback_chunks) / len(eligible_failure_chunks), 1)
+            print(f"  Fallback rate over chunks with a route-eligible primary failure: {len(fallback_chunks)} of {len(eligible_failure_chunks)} ({share}%)")
+        print(f"  Chunks parked for provider-wide failure (pending; replay on rerun): {parked_total}")
+        print(f"  Circuit breaker cooldowns taken: {circuit_trips_total}")
         for model in sorted(model_outcomes.keys()):
             outcomes = model_outcomes[model]
             line_text = "  Chunks by model " + model + ":"
