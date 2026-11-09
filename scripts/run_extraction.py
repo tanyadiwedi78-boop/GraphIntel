@@ -5,6 +5,11 @@ same runner, validator, cache and review tooling with a Groq or OpenAI model
 instead. OpenAI has no free tier: it needs --openai-model (this build invents
 no model id) and --openai-allow-paid, which records the user's approval of
 paid usage; it is not a spending limit and does not cap dollars.
+
+--fallback-provider keeps a run working when the primary provider is down or
+rate-limited: only provider-wide problems (rate limit, quota, server or
+network failure) fail over, never setup problems or bad answers. Saved
+results and event logs always name the provider that produced each answer.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from app.config import ConfigError, load_settings
 from app.extraction.client import GeminiClient
 from app.extraction.groq_client import GroqClient
 from app.extraction.openai_client import OpenAIClient
+from app.extraction.router import ProviderRouter
 from app.extraction.runner import JsonlEvents, RunLimits, run_extraction
 from app.graph.ontology import load_ontology
 
@@ -40,6 +46,70 @@ def load_chunks(chunks_path: Path, max_chunks: int, wanted_ids=None) -> list:
             if wanted_ids is None and len(chunks) >= max_chunks:
                 break
     return chunks
+
+
+PROVIDER_NAMES = {"gemini": "Gemini", "groq": "Groq", "openai": "OpenAI"}
+
+
+def gate_provider(provider: str, args, max_rpm, max_tpm) -> bool:
+    """Print why this provider may not be called and return False, or return True.
+
+    Every configured provider (primary or fallback) passes the same gates:
+    its own cost approval and explicit per-minute rate limits.
+    """
+    if provider == "groq":
+        provider_name = "Groq"
+        limits_page = "the Groq console limits page"
+        billing_check = "you checked the Groq console (Billing / Plans page)"
+    elif provider == "openai":
+        provider_name = "OpenAI"
+        limits_page = "your organization's limits page in the OpenAI platform"
+        billing_check = ""
+    else:
+        provider_name = "Gemini"
+        limits_page = "the AI Studio rate limit page"
+        billing_check = "you checked Google AI Studio (API keys / Projects page)"
+
+    if provider == "openai":
+        if args.openai_model is None or args.openai_model.strip() == "":
+            print("--provider openai needs --openai-model with the exact model id from the OpenAI")
+            print("platform docs - for example the model line from a script that already runs for")
+            print("you. This build invents no model id.")
+            return False
+        if not args.openai_allow_paid:
+            print("Live OpenAI calls stay blocked until you pass --openai-allow-paid")
+            print("That flag means: you approved paid usage and set a spending limit in the")
+            print("OpenAI platform. The flag records your approval; it does not cap dollars.")
+            print("OpenAI has no free tier, so --assume-free does not apply to OpenAI.")
+            return False
+    elif not args.gemini_assume_free:
+        print(f"Live {provider_name} calls stay blocked until you pass --assume-free")
+        print("(the older --gemini-assume-free name also works).")
+        print(f"That flag means: {billing_check}")
+        print("and this account has NO paid plan or billing linked, so it stays on the free tier.")
+        print("The code cannot check that for you; the flag is an attestation, not billing")
+        print("protection. Paid calls are not implemented in this build.")
+        return False
+    if max_rpm is None or max_tpm is None:
+        print(f"Live {provider_name} calls also need --max-rpm and --max-tpm")
+        print("(older names --gemini-max-rpm and --gemini-max-tpm also work):")
+        print("your account's requests-per-minute and input-tokens-per-minute limits,")
+        print(f"copied from {limits_page}. Limits are per account and per")
+        print("model and can change with your tier, so this build invents no numbers.")
+        return False
+    return True
+
+
+def build_client(provider: str, args, ontology, max_rpm, max_tpm):
+    """Construct one provider's client after its gates passed."""
+    if provider == "groq":
+        return GroqClient(ontology, model_id=args.groq_model, assume_free=True,
+                          max_requests_per_minute=max_rpm, max_tokens_per_minute=max_tpm)
+    if provider == "openai":
+        return OpenAIClient(ontology, model_id=args.openai_model, allow_paid=True,
+                            max_requests_per_minute=max_rpm, max_tokens_per_minute=max_tpm)
+    return GeminiClient(ontology, model_id=args.model, assume_free=True,
+                        max_requests_per_minute=max_rpm, max_tokens_per_minute=max_tpm)
 
 
 def limit_documents(chunks: list, max_documents: int) -> list:
@@ -79,6 +149,19 @@ def main() -> int:
                         help="you approved paid OpenAI usage and set a spending limit in the OpenAI "
                              "platform. The flag records your approval; it does not cap dollars. "
                              "Required for any live OpenAI call; OpenAI has no free tier.")
+    parser.add_argument("--fallback-provider", default=None, choices=["gemini", "groq", "openai"],
+                        help="provider the run continues on when the primary hits a provider-wide "
+                             "problem (rate limit, quota, server or network failure). Setup problems "
+                             "(key, model id, billing) never fail over: the run stops so you can fix "
+                             "them. Each configured provider passes its own cost and rate limit gates; "
+                             "an OpenAI fallback stays blocked until --openai-allow-paid and "
+                             "--openai-model are given.")
+    parser.add_argument("--fallback-max-rpm", type=int, default=None,
+                        help="requests per minute limit for the fallback provider "
+                             "(default: the --max-rpm value)")
+    parser.add_argument("--fallback-max-tpm", type=int, default=None,
+                        help="input tokens per minute limit for the fallback provider "
+                             "(default: the --max-tpm value)")
     parser.add_argument("--gemini-assume-free", "--assume-free", dest="gemini_assume_free",
                         action="store_true",
                         help="you checked the provider console and this account has NO paid plan "
@@ -171,70 +254,47 @@ def main() -> int:
                        give_up_after_runs=args.give_up_after_runs,
                        retry_given_up=args.retry_given_up)
 
-    if args.provider == "groq":
-        provider_name = "Groq"
-        limits_page = "the Groq console limits page"
-        billing_check = "you checked the Groq console (Billing / Plans page)"
-    elif args.provider == "openai":
-        provider_name = "OpenAI"
-        limits_page = "your organization's limits page in the OpenAI platform"
-    else:
-        provider_name = "Gemini"
-        limits_page = "the AI Studio rate limit page"
-        billing_check = "you checked Google AI Studio (API keys / Projects page)"
+    providers = [args.provider]
+    if args.fallback_provider is not None:
+        if args.fallback_provider == args.provider:
+            print("--fallback-provider must name a different provider than --provider.")
+            return 1
+        providers.append(args.fallback_provider)
 
-    if args.provider == "openai":
-        if args.openai_model is None or args.openai_model.strip() == "":
-            print("--provider openai needs --openai-model with the exact model id from the OpenAI")
-            print("platform docs - for example the model line from a script that already runs for")
-            print("you. This build invents no model id.")
+    clients = []
+    position = 0
+    for provider in providers:
+        if position == 0:
+            max_rpm = args.gemini_max_rpm
+            max_tpm = args.gemini_max_tpm
+        else:
+            max_rpm = args.fallback_max_rpm
+            if max_rpm is None:
+                max_rpm = args.gemini_max_rpm
+            max_tpm = args.fallback_max_tpm
+            if max_tpm is None:
+                max_tpm = args.gemini_max_tpm
+        if not gate_provider(provider, args, max_rpm, max_tpm):
             return 1
-        if not args.openai_allow_paid:
-            print("Live OpenAI calls stay blocked until you pass --openai-allow-paid")
-            print("That flag means: you approved paid usage and set a spending limit in the")
-            print("OpenAI platform. The flag records your approval; it does not cap dollars.")
-            print("OpenAI has no free tier, so --assume-free does not apply to OpenAI.")
+        try:
+            one_client = build_client(provider, args, ontology, max_rpm, max_tpm)
+        except ValueError as error:
+            print(f"{PROVIDER_NAMES[provider]} setup problem: {error}")
             return 1
-    elif not args.gemini_assume_free:
-        print(f"Live {provider_name} calls stay blocked until you pass --assume-free")
-        print("(the older --gemini-assume-free name also works).")
-        print(f"That flag means: {billing_check}")
-        print("and this account has NO paid plan or billing linked, so it stays on the free tier.")
-        print("The code cannot check that for you; the flag is an attestation, not billing")
-        print("protection. Paid calls are not implemented in this build.")
-        return 1
-    if args.gemini_max_rpm is None or args.gemini_max_tpm is None:
-        print(f"Live {provider_name} calls also need --max-rpm and --max-tpm")
-        print("(older names --gemini-max-rpm and --gemini-max-tpm also work):")
-        print("your account's requests-per-minute and input-tokens-per-minute limits,")
-        print(f"copied from {limits_page}. Limits are per account and per")
-        print("model and can change with your tier, so this build invents no numbers.")
-        return 1
+        clients.append(one_client)
+        position = position + 1
 
-    if args.provider == "groq":
-        try:
-            client = GroqClient(ontology, model_id=args.groq_model, assume_free=True,
-                                max_requests_per_minute=args.gemini_max_rpm,
-                                max_tokens_per_minute=args.gemini_max_tpm)
-        except ValueError as error:
-            print(f"Groq setup problem: {error}")
-            return 1
-    elif args.provider == "openai":
-        try:
-            client = OpenAIClient(ontology, model_id=args.openai_model, allow_paid=True,
-                                  max_requests_per_minute=args.gemini_max_rpm,
-                                  max_tokens_per_minute=args.gemini_max_tpm)
-        except ValueError as error:
-            print(f"OpenAI setup problem: {error}")
-            return 1
+    if len(clients) == 1:
+        client = clients[0]
     else:
-        try:
-            client = GeminiClient(ontology, model_id=args.model, assume_free=True,
-                                  max_requests_per_minute=args.gemini_max_rpm,
-                                  max_tokens_per_minute=args.gemini_max_tpm)
-        except ValueError as error:
-            print(f"Gemini setup problem: {error}")
-            return 1
+        client = ProviderRouter(clients)
+        primary_name = PROVIDER_NAMES[providers[0]]
+        fallback_name = PROVIDER_NAMES[providers[1]]
+        print(f"Fallback route: if {primary_name} hits a provider-wide problem (rate limit, quota,")
+        print(f"server or network failure), the run continues on {fallback_name} for the rest of")
+        print("the run. Setup problems (key, model id, billing) never fail over: the run stops")
+        print("so you can fix them. Saved results and event logs always name the provider that")
+        print("actually produced each answer.")
 
     results_dir = settings.data_dir / "extraction"
     run_id = uuid.uuid4().hex

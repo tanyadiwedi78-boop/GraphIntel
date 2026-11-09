@@ -130,6 +130,81 @@ def test_cost_is_reported_unknown_never_zero(tmp_path):
     assert "$0.0" not in result.stdout
 
 
+def attempt_outcome(status, provider="gemini", error_type=None, failover_to=None,
+                    served_after_failover=False):
+    metrics = {"prompt_tokens": None, "completion_tokens": None, "thought_tokens": None,
+               "cached_tokens": None, "paced_wait_seconds": 0.0,
+               "cost_basis": "assumed_free_unverified", "estimated_cost_usd": None,
+               "error_type": error_type, "provider": provider}
+    if failover_to is not None:
+        metrics["failover_to"] = failover_to
+    if served_after_failover:
+        metrics["served_after_failover"] = True
+    return {"run_id": "run-x", "event": "attempt", "status": status, "metrics": metrics}
+
+
+def chunk_final_full(status, attempts=1, model="gemini:m:t", valid_first_try=None, empty=None):
+    event = {"run_id": "run-x", "event": "chunk_final", "chunk_id": "c-1", "status": status,
+             "attempts": attempts, "model": model}
+    if valid_first_try is not None:
+        event["valid_first_try"] = valid_first_try
+    if empty is not None:
+        event["empty"] = empty
+    return event
+
+
+def test_api_reliability_counts_attempt_outcomes(tmp_path):
+    write_log(tmp_path, "run-a.jsonl", [
+        attempt_outcome("valid"),
+        attempt_outcome("invalid"),
+        attempt_outcome("failed", error_type="http_429"),
+        attempt_outcome("failed", error_type="output_cut_off"),
+        attempt_outcome("failed", error_type="http_401"),
+        chunk_final_full("valid"),
+        run_final(10.0),
+    ])
+    result = run_tool(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "Answered and passed validation: 1 (20.0% of attempts)" in result.stdout
+    assert "Answered but rejected by validation (content problem): 1 (20.0% of attempts)" in result.stdout
+    assert "Failed, transient provider problem (rate limit, quota, network, server): 1" in result.stdout
+    assert "Failed, answer cut off at the output token limit: 1" in result.stdout
+    assert "Failed, setup problem (key, model id, billing; not retried): 1" in result.stdout
+    assert "Failed, blocked by the cost gate before any request: 0" in result.stdout
+
+
+def test_failover_and_fallback_served_are_measured(tmp_path):
+    write_log(tmp_path, "run-a.jsonl", [
+        attempt_outcome("failed", provider="gemini", error_type="http_503",
+                        failover_to="openai:gpt-6-luna:tag"),
+        attempt_outcome("valid", provider="openai", served_after_failover=True),
+        chunk_final_full("valid", attempts=2, model="openai:gpt-6-luna:tag"),
+        run_final(10.0),
+    ])
+    result = run_tool(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "Attempts by provider: gemini: 1" in result.stdout
+    assert "Attempts by provider: openai: 1" in result.stdout
+    assert "Failovers to a fallback provider (route-eligible provider failures): 1" in result.stdout
+    assert "Attempts served after failover: 1" in result.stdout
+    assert "Chunks by model openai:gpt-6-luna:tag: valid=1" in result.stdout
+
+
+def test_attempts_per_chunk_first_try_and_empty_answers(tmp_path):
+    write_log(tmp_path, "run-a.jsonl", [
+        attempt_outcome("valid"),
+        chunk_final_full("valid", attempts=1, valid_first_try=True, empty=False),
+        chunk_final_full("valid", attempts=2, valid_first_try=False, empty=True),
+        chunk_final_full("invalid", attempts=3),
+        run_final(10.0),
+    ])
+    result = run_tool(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "Attempts per fresh chunk: 1 attempt(s): 1, 2 attempt(s): 1, 3 attempt(s): 1" in result.stdout
+    assert "Valid on the first try: 1 of 2 valid chunks" in result.stdout
+    assert "Valid answers with zero relationships (empty answers): 1 of 2" in result.stdout
+
+
 def test_retry_wait_is_summed(tmp_path):
     write_log(tmp_path, "run-a.jsonl", [
         chunk_final("valid", chunk_seconds=8.0, retry_wait=2.0),

@@ -132,6 +132,32 @@ def test_openai_provider_needs_an_explicit_model_id(tmp_path):
     assert "--openai-model" in result.stdout
 
 
+def test_fallback_must_differ_from_primary(tmp_path):
+    write_chunks(tmp_path, 3)
+    result = run_script(tmp_path, GOOD_FLAGS + ["--fallback-provider", "gemini"],
+                        {"GEMINI_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "different provider" in result.stdout
+
+
+def test_fallback_provider_is_gated_and_keyed_too(tmp_path):
+    write_chunks(tmp_path, 3)
+    flags = GOOD_FLAGS + ["--fallback-provider", "groq"]
+    result = run_script(tmp_path, flags, {"GEMINI_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "Groq setup problem" in result.stdout
+    assert "GROQ_API_KEY" in result.stdout
+
+
+def test_openai_fallback_still_needs_paid_approval(tmp_path):
+    write_chunks(tmp_path, 3)
+    flags = GOOD_FLAGS + ["--fallback-provider", "openai", "--openai-model", "gpt-6-luna"]
+    result = run_script(tmp_path, flags, {"GEMINI_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "Live OpenAI calls stay blocked" in result.stdout
+    assert "--openai-allow-paid" in result.stdout
+
+
 def test_unknown_provider_is_rejected(tmp_path):
     write_chunks(tmp_path, 3)
     result = run_script(tmp_path, GOOD_FLAGS + ["--provider", "other"])

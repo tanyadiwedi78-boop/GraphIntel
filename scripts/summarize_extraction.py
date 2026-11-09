@@ -2,8 +2,11 @@
 
 Reads every data/extraction_logs/*.jsonl and prints measured totals: chunk
 outcomes, run time, chunk timing median/p95, retry and pacing waits, token
-usage (where the provider reported it) and the cost basis. Every number here
-is measured from a real run's log; nothing is estimated. Cost is reported as
+usage (where the provider reported it) and the cost basis, plus per-attempt
+API reliability (validation pass, content rejections, transient failures,
+cut-offs, setup problems), attempts per chunk, first-try valid rate, empty
+answers and provider routing (failovers, attempts per provider, outcomes per
+model). Every number here is measured from a real run's log; nothing is estimated. Cost is reported as
 unknown unless the logged attempts carry a verified price - the client writes
 estimated_cost_usd as unknown on purpose, so unknown is never printed as $0.
 """
@@ -61,6 +64,15 @@ def main() -> int:
     run_count = 0
     status_counts = {}
     chunk_seconds = []
+    attempt_status = {}
+    attempt_errors = {}
+    attempt_providers = {}
+    failover_count = 0
+    fallback_served = 0
+    chunk_attempt_counts = {}
+    first_try_valid = 0
+    empty_valid = 0
+    model_outcomes = {}
     retry_wait_total = 0.0
     paced_wait_total = 0.0
     elapsed_total = 0.0
@@ -90,6 +102,20 @@ def main() -> int:
                     attempt_count = attempt_count + 1
                     metrics = event.get("metrics", {})
                     add_tokens(totals, metrics)
+                    outcome = str(event.get("status"))
+                    attempt_status[outcome] = attempt_status.get(outcome, 0) + 1
+                    provider = metrics.get("provider")
+                    if isinstance(provider, str) and provider != "":
+                        attempt_providers[provider] = attempt_providers.get(provider, 0) + 1
+                    if metrics.get("failover_to"):
+                        failover_count = failover_count + 1
+                    if metrics.get("served_after_failover"):
+                        fallback_served = fallback_served + 1
+                    if outcome == "failed":
+                        error_type = metrics.get("error_type")
+                        if not isinstance(error_type, str) or error_type == "":
+                            error_type = "unknown"
+                        attempt_errors[error_type] = attempt_errors.get(error_type, 0) + 1
                     doc = event.get("document_id")
                     if isinstance(doc, str) and doc != "":
                         doc_attempts[doc] = doc_attempts.get(doc, 0) + 1
@@ -109,6 +135,19 @@ def main() -> int:
                     status = str(event.get("status"))
                     status_counts[status] = status_counts.get(status, 0) + 1
                     run_status[status] = run_status.get(status, 0) + 1
+                    if status in ("valid", "invalid", "failed"):
+                        n_attempts = event.get("attempts")
+                        if isinstance(n_attempts, int) and not isinstance(n_attempts, bool) and n_attempts > 0:
+                            chunk_attempt_counts[n_attempts] = chunk_attempt_counts.get(n_attempts, 0) + 1
+                        if event.get("valid_first_try") is True:
+                            first_try_valid = first_try_valid + 1
+                        if status == "valid" and event.get("empty") is True:
+                            empty_valid = empty_valid + 1
+                        model = event.get("model")
+                        if isinstance(model, str) and model != "":
+                            if model not in model_outcomes:
+                                model_outcomes[model] = {}
+                            model_outcomes[model][status] = model_outcomes[model].get(status, 0) + 1
                     seconds = event.get("chunk_seconds")
                     if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
                         chunk_seconds.append(seconds)
@@ -174,6 +213,64 @@ def main() -> int:
         print("The calls, tokens and chunk times above are the measured per-document budget inputs.")
     print(f"Retry backoff wait total: {round(retry_wait_total, 3)} s")
     print(f"Rate-limit pacing wait total: {round(paced_wait_total, 3)} s")
+    if attempt_count > 0:
+        print("API reliability (per attempt, measured from the logs):")
+        answered_valid = attempt_status.get("valid", 0)
+        answered_invalid = attempt_status.get("invalid", 0)
+        print(f"  Answered and passed validation: {answered_valid} "
+              f"({round(100 * answered_valid / attempt_count, 1)}% of attempts)")
+        print(f"  Answered but rejected by validation (content problem): {answered_invalid} "
+              f"({round(100 * answered_invalid / attempt_count, 1)}% of attempts)")
+        # Failed attempts grouped by cause. The bucket boundaries are fixed so
+        # a transient provider problem is never confused with a content or
+        # setup problem.
+        buckets = {"transient": 0, "cut_off": 0, "setup": 0, "cost_blocked": 0, "other": 0}
+        other_names = {}
+        for error_type in sorted(attempt_errors.keys()):
+            count = attempt_errors[error_type]
+            bucket = "other"
+            if error_type in ("output_cut_off", "chunk_failed"):
+                bucket = "cut_off"
+            elif error_type == "cost_blocked":
+                bucket = "cost_blocked"
+            elif error_type == "transport_or_timeout":
+                bucket = "transient"
+            elif error_type.startswith("http_") and error_type[5:].isdigit():
+                code = int(error_type[5:])
+                if code == 429 or code == 408 or code >= 500:
+                    bucket = "transient"
+                else:
+                    bucket = "setup"
+            buckets[bucket] = buckets[bucket] + count
+            if bucket == "other":
+                other_names[error_type] = count
+        print(f"  Failed, transient provider problem (rate limit, quota, network, server): {buckets['transient']}")
+        print(f"  Failed, answer cut off at the output token limit: {buckets['cut_off']}")
+        print(f"  Failed, setup problem (key, model id, billing; not retried): {buckets['setup']}")
+        print(f"  Failed, blocked by the cost gate before any request: {buckets['cost_blocked']}")
+        for error_type in sorted(other_names.keys()):
+            print(f"  Failed, other ({error_type}): {other_names[error_type]}")
+        if len(chunk_attempt_counts) > 0:
+            parts = []
+            for n in sorted(chunk_attempt_counts.keys()):
+                parts.append(str(n) + " attempt(s): " + str(chunk_attempt_counts[n]))
+            print("  Attempts per fresh chunk: " + ", ".join(parts))
+        valid_chunks = status_counts.get("valid", 0)
+        if valid_chunks > 0:
+            print(f"  Valid on the first try: {first_try_valid} of {valid_chunks} valid chunks")
+            print(f"  Valid answers with zero relationships (empty answers): {empty_valid} of {valid_chunks}")
+        print("Provider routing:")
+        if len(attempt_providers) > 0:
+            for provider in sorted(attempt_providers.keys()):
+                print(f"  Attempts by provider: {provider}: {attempt_providers[provider]}")
+        print(f"  Failovers to a fallback provider (route-eligible provider failures): {failover_count}")
+        print(f"  Attempts served after failover: {fallback_served}")
+        for model in sorted(model_outcomes.keys()):
+            outcomes = model_outcomes[model]
+            line_text = "  Chunks by model " + model + ":"
+            for status in sorted(outcomes.keys()):
+                line_text = line_text + " " + status + "=" + str(outcomes[status])
+            print(line_text)
     print("Token usage (provider-reported):")
     for key in ["prompt_tokens", "completion_tokens", "thought_tokens", "cached_tokens"]:
         attempts = totals[key + "_attempts"]

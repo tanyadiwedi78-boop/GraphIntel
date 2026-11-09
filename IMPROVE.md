@@ -79,3 +79,33 @@ Running list of changes, newest first.
 - New tests: `tests/test_extraction_events.py`, `tests/test_extraction_timing.py`; restored
   `test_echo_results_are_never_reused_by_a_real_model` in `tests/test_extraction.py`.
 - Result: 109 passed on Linux, Python 3.10. Windows run pending. No live Gemini call has been made.
+
+## 2026-11-09 - multi-provider extraction: OpenAI adapter, fallback routing, reliability metrics
+
+- `app/extraction/openai_client.py` (new): OpenAI chat-completions client with the same
+  contract as the Gemini and Groq clients (same prompt, schema, validator, cache; its own
+  work keys so results never mix). The model id is REQUIRED - this build invents no model
+  id. No free tier, so no assume_free mode: every call needs `allow_paid=True` plus explicit
+  per-minute limits, and the gate runs before any request is built. The flag records the
+  user's approval of paid usage; it is not a spending limit and does not cap dollars.
+  `reasoning_effort` is sent only when configured - no per-model defaults.
+- `app/extraction/router.py` (new): `ProviderRouter` wraps a primary client and optional
+  fallbacks behind the same callable contract. Only provider-wide problems fail over
+  (429, 408, 5xx, network); setup problems (key, model id, billing - any other 4xx) and
+  content failures (cut-off answers) NEVER fail over, so a misconfiguration stops the run
+  before any fallback - including a paid one - is touched. Failover is one-way per run.
+  The failed attempt is re-raised so the runner's attempt accounting stays exact.
+- `app/extraction/runner.py`: work keys, attempt events and saved records name the ACTIVE
+  provider per chunk and per attempt, so provenance survives a mid-run failover.
+  Single-client runs are unchanged.
+- `scripts/run_extraction.py`: `--provider openai` with `--openai-model` (no default) and
+  `--openai-allow-paid`; `--fallback-provider` with `--fallback-max-rpm/--fallback-max-tpm`.
+  Every configured provider passes the same cost and rate-limit gates.
+- `scripts/summarize_extraction.py`: new measured sections - API reliability per attempt
+  (validation pass, content rejections, transient provider failures, output cut-offs,
+  setup problems, cost-gate blocks), attempts per fresh chunk, first-try valid rate,
+  empty answers, and provider routing (attempts per provider, failovers, attempts served
+  after failover, chunk outcomes per model).
+- Tests: `tests/test_openai_client.py`, `tests/test_router.py`, plus CLI gate and
+  summarizer tests. 208 offline tests pass on Linux (fake HTTP servers and fake clients
+  only; no network, no real keys). No live OpenAI or fallback call has been made.

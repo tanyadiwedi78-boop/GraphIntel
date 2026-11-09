@@ -259,6 +259,11 @@ def run_extraction(
 
     for chunk in chunks:
         chunk_id = chunk["chunk_id"]
+        # A router can fail over to another provider mid-run. Name the ACTIVE
+        # provider for this chunk's work key, events and saved record, so
+        # provenance always says exactly which provider produced the result.
+        # For a single client this never changes.
+        model_name = getattr(call_model, "model_name", model_name)
         work_key = make_work_key(chunk, fingerprint, SCHEMA_VERSION, PROMPT_VERSION, model_name)
 
         saved_record = load_result(results_dir, chunk_id, work_key)
@@ -300,6 +305,10 @@ def run_extraction(
 
             attempt = attempt + 1
             summary["calls_used"] = summary["calls_used"] + 1
+            # Snapshot the provider BEFORE the call: a router can fail over
+            # inside the call, and this attempt was still served by the one
+            # that received it.
+            attempt_model = getattr(call_model, "model_name", model_name)
             call_start = clock()
             try:
                 raw_text = call_model(prompt)
@@ -312,7 +321,8 @@ def run_extraction(
                 metrics = dict(getattr(call_model, "last_metrics", {}))
                 metrics.setdefault("latency_ms", round((clock() - call_start) * 1000, 3))
                 metrics.setdefault("error_type", "chunk_failed")
-                emit("attempt", chunk, attempt=attempt, status="failed", metrics=metrics)
+                emit("attempt", chunk, attempt=attempt, status="failed", metrics=metrics,
+                    model=attempt_model)
                 break
             except ProviderError as error:
                 last_error_text = str(error)
@@ -320,7 +330,8 @@ def run_extraction(
                 metrics = dict(getattr(call_model, "last_metrics", {}))
                 metrics.setdefault("latency_ms", round((clock() - call_start) * 1000, 3))
                 metrics.setdefault("error_type", "http_" + str(error.status_code))
-                emit("attempt", chunk, attempt=attempt, status="failed", metrics=metrics)
+                emit("attempt", chunk, attempt=attempt, status="failed", metrics=metrics,
+                    model=attempt_model)
                 failure_kind = "transient"  # rate limit, quota, network, 5xx: the run's problem, not the chunk's
                 if classify_status(error.status_code) != RETRY_LATER:
                     summary["stopped_early"] = True
@@ -359,7 +370,7 @@ def run_extraction(
                 last_error_text = ""
             emit("attempt", chunk, attempt=attempt, status=validation_status,
                 metrics=metrics, problems=problems,
-                retry_with_feedback=(prompt != base_prompt))
+                retry_with_feedback=(prompt != base_prompt), model=attempt_model)
             if is_valid:
                 outcome = "valid"
                 break
@@ -370,7 +381,10 @@ def run_extraction(
                 prompt = build_retry_prompt(base_prompt, problems)
 
         # One record per chunk and recipe: run metadata once, then the validated
-        # entities and relationships in the model's own shape.
+        # entities and relationships in the model's own shape. Name the provider
+        # that produced the FINAL outcome of this chunk: a router may have failed
+        # over mid-chunk, and provenance says who actually produced the result.
+        model_name = getattr(call_model, "model_name", model_name)
         previous_runs = 0
         if saved_record is not None:
             saved_runs = saved_record.get("runs")
