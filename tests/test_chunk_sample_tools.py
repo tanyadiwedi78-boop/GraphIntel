@@ -585,31 +585,34 @@ def test_max_documents_scopes_the_run_to_the_first_documents(tmp_path):
     assert len(all_docs) == 9
 
 
-def test_persistent_server_error_stops_run_before_later_chunks(tmp_path):
-    # A provider-wide failure (persistent 503: network or server) must stop the
-    # run: visiting later chunks would burn the call cap on more failures. The
-    # failed chunk stays pending (transient, runs not counted) and later chunks
-    # are never visited, so no records exist for them at all.
+def test_persistent_server_error_parks_chunks_and_continues(tmp_path):
+    # A provider-wide failure (persistent 503: network or server) parks the
+    # chunk and the run CONTINUES: the parked chunk's record stays pending
+    # (transient, runs not counted) and later chunks are still visited, so a
+    # rerun replays everything parked. The circuit breaker (5 parked chunks in
+    # a row) is not reached here, so no cooldown happens.
     ontology = load_ontology(REPO_ROOT / "configs" / "ontology.json")
     quote = "develops the Widget Engine"
     chunks = []
     for number in range(3):
         chunks.append(make_runner_chunk("chunk-" + str(number + 1), quote))
     results_dir = str(tmp_path / "extraction")
-    limits = RunLimits(max_calls=10)  # the cap alone would NOT stop this run
-    model = FakeModel([ProviderError(503), ProviderError(503), ProviderError(503)])
+    limits = RunLimits(max_calls=10)
+    model = FakeModel([ProviderError(503)] * 9)
     summary = run_extraction(chunks, model, ontology, "fake-model", results_dir, limits,
                              sleep=no_sleep)
-    assert summary["calls_used"] == 3  # chunk-1's in-run retries only
-    assert summary["stopped_early"] is True
-    assert "provider-side failure" in summary["stop_reason"]
-    assert len(model.calls) == 3  # chunk-2 and chunk-3 were never visited
-    saved_files = os.listdir(results_dir)
-    assert len(saved_files) == 1  # only chunk-1 has a record: pending, transient
-    with open(os.path.join(results_dir, saved_files[0]), "r", encoding="utf-8") as f:
-        saved = json.load(f)
-    assert saved["failure_kind"] == "transient"
-    assert saved["runs"] == 0
+    assert summary["calls_used"] == 9  # 3 chunks, 3 attempts each
+    assert summary["stopped_early"] is False
+    assert summary["parked_transient"] == 3
+    assert summary["circuit_trips"] == 0
+    assert len(model.calls) == 9  # every chunk was visited
+    saved_files = sorted(os.listdir(results_dir))
+    assert len(saved_files) == 3  # all three chunks parked: pending, transient
+    for filename in saved_files:
+        with open(os.path.join(results_dir, filename), "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        assert saved["failure_kind"] == "transient"
+        assert saved["runs"] == 0
 
 
 def test_auth_error_stops_run_immediately(tmp_path):

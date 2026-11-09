@@ -251,3 +251,107 @@ def test_failover_run_records_each_attempts_provider_and_skips_on_rerun(tmp_path
     skip_event = rerun_events[0]
     assert skip_event["status"] == "skipped"
     assert skip_event["accepted_from_model"] == "groq:model-y:tag"
+
+
+def test_request_failover_without_a_fallback_returns_false():
+    only = FakeClient("gemini:model-x:tag", "gemini", ["unused"])
+    router = ProviderRouter([only])
+    assert router.request_failover("schema_invalid_after_repair") is False
+    assert router.active_index == 0
+    assert router.route_events == []
+
+
+def test_request_failover_switches_provider_and_records_the_reason():
+    primary = FakeClient("gemini:model-x:tag", "gemini", ["unused"])
+    fallback = FakeClient("openai:model-y:tag", "openai", ["unused"])
+    router = ProviderRouter([primary, fallback])
+    assert router.request_failover("schema_invalid_after_repair") is True
+    assert router.active_index == 1
+    assert router.model_name == "openai:model-y:tag"
+    assert router.route_events == [{
+        "from_model": "gemini:model-x:tag",
+        "to_model": "openai:model-y:tag",
+        "reason": "schema_invalid_after_repair",
+    }]
+
+
+def test_schema_invalid_after_one_repair_routes_to_the_fallback(tmp_path):
+    """Her fallback_on policy: an answer that fails validation, then fails the
+    ONE repair attempt too, moves the chunk to the fallback - which faces the
+    same prompt, schema and validation. Attempts stay exactly counted:
+    1 base + 1 repair on the primary, then the fallback's first try."""
+    ontology = load_ontology("configs/ontology.json")
+    primary = FakeClient("gemini:model-x:tag", "gemini", ["bad answer", "still bad"])
+    fallback = FakeClient("openai:model-y:tag", "openai", [good_answer(QUOTE)])
+    router = ProviderRouter([primary, fallback])
+    events = []
+    summary = run_extraction([make_chunk(1)], router, ontology, router.model_name,
+                             str(tmp_path), quick_limits(max_attempts_per_chunk=3),
+                             lambda seconds: None, log_event=events.append)
+    assert summary["valid"] == 1
+    assert len(primary.calls) == 2   # base + 1 repair, never more
+    assert len(fallback.calls) == 1
+    assert fallback.calls[0] == primary.calls[0]  # fallback gets the SAME base prompt
+    attempts = []
+    for event in events:
+        if event["event"] == "attempt":
+            attempts.append(event)
+    assert len(attempts) == 3
+    assert attempts[0]["model"] == "gemini:model-x:tag"
+    assert attempts[0]["status"] == "invalid"
+    assert attempts[0]["retry_with_feedback"] is False
+    assert attempts[1]["model"] == "gemini:model-x:tag"
+    assert attempts[1]["status"] == "invalid"
+    assert attempts[1]["retry_with_feedback"] is True   # the repair attempt
+    assert attempts[2]["model"] == "openai:model-y:tag"
+    assert attempts[2]["status"] == "valid"
+    assert attempts[2]["retry_with_feedback"] is False  # fresh base prompt on the fallback
+    assert router.route_events[-1]["reason"] == "schema_invalid_after_repair"
+    saved_files = list(tmp_path.glob("chunk-1__*.json"))
+    assert len(saved_files) == 1
+    record = json.loads(saved_files[0].read_text(encoding="utf-8"))
+    assert record["model"] == "openai:model-y:tag"
+    assert record["status"] == "valid"
+    assert record["fallback_reason"] == "schema_invalid_after_repair"
+    assert record["primary_error_type"] == "schema_invalid"
+
+
+def test_schema_invalid_after_repair_without_fallback_keeps_repairing(tmp_path):
+    """With no fallback there is nowhere to route: the chunk keeps repairing
+    on the same provider until the attempt cap, exactly as before."""
+    ontology = load_ontology("configs/ontology.json")
+    only = FakeClient("gemini:model-x:tag", "gemini", ["bad", "bad", good_answer(QUOTE)])
+    router = ProviderRouter([only])
+    summary = run_extraction([make_chunk(1)], router, ontology, router.model_name,
+                             str(tmp_path), quick_limits(max_attempts_per_chunk=3),
+                             lambda seconds: None)
+    assert summary["valid"] == 1
+    assert len(only.calls) == 3
+    assert router.route_events == []
+
+
+def test_both_providers_blocked_parks_chunks_and_replay_recovers(tmp_path):
+    """Her failure test, mocked: every provider call fails provider-wide, so
+    every chunk is parked pending (dead letter) and the run continues. A rerun
+    against a healthy provider recovers all of them - nothing is lost."""
+    ontology = load_ontology("configs/ontology.json")
+    chunks = [make_chunk(1), make_chunk(2), make_chunk(3)]
+    # Chunk 1 fails over to the fallback on its second attempt; chunks 2 and
+    # 3 start on the fallback directly. Every call fails provider-wide.
+    primary = FakeClient("gemini:model-x:tag", "gemini", [ProviderError(503)] * 2)
+    fallback = FakeClient("openai:model-y:tag", "openai", [ProviderError(503)] * 4)
+    router = ProviderRouter([primary, fallback])
+    summary = run_extraction(chunks, router, ontology, router.model_name,
+                             str(tmp_path), quick_limits(max_attempts_per_chunk=2),
+                             lambda seconds: None)
+    assert len(primary.calls) == 2
+    assert len(fallback.calls) == 4
+    assert summary["valid"] == 0
+    assert summary["failed"] == 3
+    assert summary["parked_transient"] == 3
+    assert summary["stopped_early"] is False
+    healthy = FakeClient("gemini:model-x:tag", "gemini", [good_answer(QUOTE)] * 3)
+    replay = run_extraction(chunks, healthy, ontology, healthy.model_name,
+                            str(tmp_path), quick_limits(), lambda seconds: None)
+    assert replay["valid"] == 3
+    assert replay["parked_transient"] == 0

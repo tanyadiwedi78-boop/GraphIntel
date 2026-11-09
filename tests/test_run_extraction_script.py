@@ -124,9 +124,14 @@ def test_openai_provider_needs_paid_approval_not_assume_free(tmp_path):
 
 
 def test_openai_provider_needs_an_explicit_model_id(tmp_path):
+    # No --openai-model flag and no config entry: the run must refuse. An
+    # empty config file stands in so the repo's real config cannot supply one.
     write_chunks(tmp_path, 3)
+    empty_config = tmp_path / "empty-config.yaml"
+    empty_config.write_text("{}", encoding="utf-8")
     flags = ["--gemini-max-rpm", "100", "--gemini-max-tpm", "100000",
-             "--provider", "openai", "--openai-allow-paid"]
+             "--provider", "openai", "--openai-allow-paid",
+             "--config", str(empty_config)]
     result = run_script(tmp_path, flags, {"OPENAI_API_KEY": "fake-key"})
     assert result.returncode == 1
     assert "--openai-model" in result.stdout
@@ -162,3 +167,36 @@ def test_unknown_provider_is_rejected(tmp_path):
     write_chunks(tmp_path, 3)
     result = run_script(tmp_path, GOOD_FLAGS + ["--provider", "other"])
     assert result.returncode != 0
+
+
+def test_config_file_can_supply_the_openai_model_id(tmp_path):
+    # The exact OpenAI model id may come from configs/extraction.yaml instead of
+    # --openai-model. Proof: with the id only in the config, the model gate
+    # passes and the run stops at the NEXT gate (paid approval) instead.
+    write_chunks(tmp_path, 3)
+    config = tmp_path / "extraction-config.yaml"
+    config.write_text("extraction:\n  providers:\n    - {name: openai, model: gpt-6-luna}\n",
+                      encoding="utf-8")
+    flags = ["--gemini-max-rpm", "100", "--gemini-max-tpm", "100000",
+             "--provider", "openai", "--config", str(config)]
+    result = run_script(tmp_path, flags, {"OPENAI_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "--openai-allow-paid" in result.stdout
+    assert "needs the exact model id" not in result.stdout
+
+
+def test_unknown_fallback_cause_in_config_is_rejected(tmp_path):
+    write_chunks(tmp_path, 3)
+    config = tmp_path / "bad-config.yaml"
+    config.write_text("extraction:\n  fallback_on: [rate_limit, bad_cause]\n", encoding="utf-8")
+    result = run_script(tmp_path, GOOD_FLAGS + ["--config", str(config)], {"GEMINI_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "bad_cause" in result.stdout
+
+
+def test_missing_explicit_config_file_is_rejected(tmp_path):
+    write_chunks(tmp_path, 3)
+    result = run_script(tmp_path, GOOD_FLAGS + ["--config", str(tmp_path / "not-there.yaml")],
+                        {"GEMINI_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "Config file not found" in result.stdout

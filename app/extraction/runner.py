@@ -164,6 +164,10 @@ class RunLimits:
     stop_after_failed_chunks: int = 5
     give_up_after_runs: int = 3          # CONTENT failures in this many separate runs: skip the chunk
     retry_given_up: bool = False         # True: include given-up chunks again (records are kept, never deleted)
+    # Circuit breaker for provider-wide failure: after this many chunks parked
+    # for transient failure IN A ROW, stop calling for the cooldown, then resume.
+    circuit_consecutive_failures: int = 5
+    circuit_cooldown_seconds: float = 120.0
 
 
 def find_compatible_valid(results_dir: str, chunk: dict, ontology_fingerprint: str,
@@ -269,6 +273,8 @@ def run_extraction(
         "failed": 0,
         "gave_up": 0,
         "calls_used": 0,
+        "parked_transient": 0,
+        "circuit_trips": 0,
         "stopped_early": False,
         "stop_reason": "",
         "elapsed_seconds": 0.0,
@@ -280,6 +286,7 @@ def run_extraction(
     }
     fingerprint = ontology.fingerprint()
     failed_in_a_row = 0
+    transient_in_a_row = 0
     run_start = clock()
     chunk_times: List[float] = []
 
@@ -354,6 +361,10 @@ def run_extraction(
         attempt = 0
         outcome = "failed"
         failure_kind = "content"
+        repairs_done = 0
+        fallback_reason = None
+        primary_error_type = None
+        chunk_route_events_before = len(getattr(call_model, "route_events", []))
         problems: List[str] = []
         relationships: List[dict] = []
         entities: List[dict] = []
@@ -402,6 +413,8 @@ def run_extraction(
                 metrics.setdefault("error_type", "http_" + str(error.status_code))
                 emit("attempt", chunk, attempt=attempt, status="failed", metrics=metrics,
                     model=attempt_model)
+                if primary_error_type is None:
+                    primary_error_type = "http_" + str(error.status_code)
                 failure_kind = "transient"  # rate limit, quota, network, 5xx: the run's problem, not the chunk's
                 if classify_status(error.status_code) != RETRY_LATER:
                     summary["stopped_early"] = True
@@ -453,9 +466,23 @@ def run_extraction(
                 break
             outcome = "invalid"   # bad answer: try again at once, no wait
             if len(problems) > 0:
+                if repairs_done >= 1:
+                    # One repair on this provider already failed validation, so
+                    # the failure is schema-shaped: with a fallback configured,
+                    # the run moves to it (fallback_on: schema_invalid_after_repair).
+                    # The same prompt, schema and validation apply there. Without
+                    # a fallback the chunk keeps repairing on this provider.
+                    request_failover = getattr(call_model, "request_failover", None)
+                    if callable(request_failover) and request_failover("schema_invalid_after_repair"):
+                        fallback_reason = "schema_invalid_after_repair"
+                        primary_error_type = "schema_invalid"
+                        prompt = base_prompt  # fresh start on the new provider
+                        repairs_done = 0
+                        continue
                 # Show the next attempt what was rejected; otherwise the
                 # identical prompt with a fixed seed just repeats the violation.
                 prompt = build_retry_prompt(base_prompt, problems)
+                repairs_done = repairs_done + 1
 
         # One record per chunk and recipe: run metadata once, then the validated
         # entities and relationships in the model's own shape. Name the provider
@@ -481,6 +508,11 @@ def run_extraction(
         runs_count = previous_runs + 1
         if outcome == "valid" or (outcome == "failed" and failure_kind == "transient"):
             runs_count = previous_runs  # only separate runs of CONTENT failure count toward give-up
+        if fallback_reason is None:
+            # An error-driven failover during this chunk also names its reason.
+            new_route_events = getattr(call_model, "route_events", [])[chunk_route_events_before:]
+            if len(new_route_events) > 0:
+                fallback_reason = new_route_events[-1].get("reason")
         record = {
             "status": outcome,
             "runs": runs_count,
@@ -500,6 +532,10 @@ def run_extraction(
             "entities": entities,
             "relationships": relationships,
         }
+        if fallback_reason is not None:
+            record["fallback_reason"] = fallback_reason
+        if primary_error_type is not None:
+            record["primary_error_type"] = primary_error_type
         if outcome == "invalid":
             record["raw_response"] = raw_text
         save(results_dir, chunk_id, work_key, record)
@@ -510,26 +546,36 @@ def run_extraction(
             valid_first_try=(outcome == "valid" and attempt == 1),
             empty=(outcome == "valid" and len(relationships) == 0),
             relationships=len(relationships), entities=len(entities),
+            fallback_reason=fallback_reason, primary_error_type=primary_error_type,
             chunk_seconds=round(chunk_seconds, 3), retry_wait_seconds=round(chunk_retry_wait, 3))
         if outcome == "valid":
             summary["valid"] = summary["valid"] + 1
             failed_in_a_row = 0
+            transient_in_a_row = 0
         elif outcome == "invalid":
             summary["invalid"] = summary["invalid"] + 1
+            transient_in_a_row = 0
         else:
             summary["failed"] = summary["failed"] + 1
-            failed_in_a_row = failed_in_a_row + 1
             if failure_kind == "transient":
                 # A provider-wide failure (rate limit, quota, network, server
-                # error) means later chunks would very likely fail the same
-                # way. Stop now instead of burning the call cap on them. The
-                # chunk's record above is transient, so it stays pending and
-                # rerunning the same command resumes exactly here.
-                summary["stopped_early"] = True
-                summary["stop_reason"] = ("provider-side failure (rate limit, quota, network or server error); "
-                                          "stopped so later chunks are not charged against the call cap. "
-                                          "This chunk stays pending: rerun the same command when the provider recovers.")
-                return finish()
+                # error) is the run's problem, not the chunk's: the chunk is
+                # parked (its transient record stays pending) and the run
+                # continues. After circuit_consecutive_failures parked chunks in
+                # a row, the circuit opens: no calls for the cooldown, then the
+                # run resumes. Rerunning the same command replays parked chunks.
+                transient_in_a_row = transient_in_a_row + 1
+                summary["parked_transient"] = summary["parked_transient"] + 1
+                if transient_in_a_row >= limits.circuit_consecutive_failures:
+                    summary["circuit_trips"] = summary["circuit_trips"] + 1
+                    emit("circuit_open", chunk, consecutive_failures=transient_in_a_row,
+                        cooldown_seconds=limits.circuit_cooldown_seconds)
+                    sleep(limits.circuit_cooldown_seconds)
+                    summary["retry_wait_seconds"] = round(summary["retry_wait_seconds"] + limits.circuit_cooldown_seconds, 3)
+                    transient_in_a_row = 0
+                continue
+            transient_in_a_row = 0  # a content failure means the provider responded
+            failed_in_a_row = failed_in_a_row + 1  # only CONTENT failures count here
             if failed_in_a_row >= limits.stop_after_failed_chunks:
                 summary["stopped_early"] = True
                 summary["stop_reason"] = "too many chunks in a row ran out of attempts"

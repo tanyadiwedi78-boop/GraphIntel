@@ -410,21 +410,74 @@ def test_stops_after_too_many_failed_chunks_in_a_row(ontology, tmp_path):
     assert len(model.calls) == 2
 
 
-def test_transient_failures_stop_the_run_before_later_chunks(ontology, tmp_path):
-    # A provider-wide failure (persistent 503) stops the run after the failed
-    # chunk: later chunks are never visited, so the call cap is not burned on
-    # more failures and everything unfinished stays pending.
+def test_transient_failures_park_chunks_and_the_run_continues(ontology, tmp_path):
+    # A provider-wide failure (persistent 503) parks the chunk - its record
+    # stays pending and never counts toward give-up - and the run CONTINUES
+    # with the later chunks. Rerunning the same command replays the parked
+    # chunks. This replaced the old stop-the-run behavior: parked work is
+    # recoverable, and the call cap still bounds the total.
     chunks = [make_chunk(1), make_chunk(2), make_chunk(3)]
-    model = FakeModel([ProviderError(503)] * 2)
+    model = FakeModel([ProviderError(503)] * 6)
     sleep, _ = no_sleep_recorder()
     summary = run_extraction(
         chunks, model, ontology, "m", str(tmp_path),
         quick_limits(max_attempts_per_chunk=2, stop_after_failed_chunks=2), sleep,
     )
+    assert summary["failed"] == 3
+    assert summary["stopped_early"] is False
+    assert summary["parked_transient"] == 3
+    assert summary["circuit_trips"] == 0
+    assert len(model.calls) == 6
+
+
+def test_max_retries_two_means_three_attempts_per_chunk(ontology, tmp_path):
+    # The config's max_retries: 2 is retries AFTER the first try: exactly 3
+    # attempts per chunk. The record keeps both numbers distinct.
+    chunks = [make_chunk(1)]
+    model = FakeModel([ProviderError(503)] * 3)
+    sleep, _ = no_sleep_recorder()
+    events = []
+    summary = run_extraction(chunks, model, ontology, "m", str(tmp_path),
+                             quick_limits(max_attempts_per_chunk=3), sleep,
+                             log_event=events.append)
+    assert len(model.calls) == 3  # 1 first try + 2 retries
     assert summary["failed"] == 1
-    assert summary["stopped_early"]
-    assert "provider-side failure" in summary["stop_reason"]
-    assert len(model.calls) == 2
+    final = events[-1]
+    assert final["event"] == "chunk_final"
+    assert final["attempts"] == 3
+    assert final["retries"] == 2
+
+
+def test_circuit_breaker_cools_down_after_five_parked_chunks(ontology, tmp_path):
+    # After 5 chunks parked for provider-wide failure in a row, the circuit
+    # opens: no calls for the 120 s cooldown, then the run resumes. Nothing is
+    # lost: every parked chunk is pending for the next run.
+    chunks = [make_chunk(number) for number in range(1, 7)]
+    model = FakeModel([ProviderError(503)] * 12)
+    sleep, waits = no_sleep_recorder()
+    events = []
+    summary = run_extraction(chunks, model, ontology, "m", str(tmp_path),
+                             quick_limits(max_attempts_per_chunk=2), sleep,
+                             log_event=events.append)
+    assert summary["parked_transient"] == 6
+    assert summary["circuit_trips"] == 1
+    assert summary["stopped_early"] is False
+    assert len(model.calls) == 12
+    assert waits.count(120.0) == 1  # the cooldown; the other waits are retry backoff
+    assert len(waits) == 7
+    circuit_events = []
+    for event in events:
+        if event["event"] == "circuit_open":
+            circuit_events.append(event)
+    assert len(circuit_events) == 1
+    assert circuit_events[0]["consecutive_failures"] == 5
+    assert circuit_events[0]["cooldown_seconds"] == 120.0
+    # Replay recovers the parked chunks.
+    healthy = FakeModel([good_answer(QUOTE)] * 6)
+    replay = run_extraction(chunks, healthy, ontology, "m", str(tmp_path),
+                            quick_limits(), sleep)
+    assert replay["valid"] == 6
+    assert replay["parked_transient"] == 0
 
 
 def test_failed_and_invalid_results_are_tried_again_next_run(ontology, tmp_path):

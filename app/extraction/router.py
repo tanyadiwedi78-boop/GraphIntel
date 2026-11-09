@@ -80,6 +80,25 @@ class ProviderRouter:
     def cost_mode(self):
         return self.clients[self.active_index].cost_mode()
 
+    def request_failover(self, reason):
+        """Content-driven failover, asked for by the runner: the active
+        provider's answers keep failing validation (schema-invalid after one
+        repair attempt). Move to the next provider for the rest of the run.
+        Returns True when a fallback took over, False when there is none.
+        The same prompt, schema and validation apply on the new provider."""
+        if self.active_index + 1 >= len(self.clients):
+            return False
+        active = self.clients[self.active_index]
+        fallback = self.clients[self.active_index + 1]
+        self.route_events.append({
+            "from_model": active.model_name,
+            "to_model": fallback.model_name,
+            "reason": reason,
+        })
+        self.active_index = self.active_index + 1
+        self.eligible_in_a_row = 0
+        return True
+
     def __call__(self, prompt):
         self.served_index = self.active_index
         active = self.clients[self.active_index]

@@ -7,9 +7,12 @@ no model id) and --openai-allow-paid, which records the user's approval of
 paid usage; it is not a spending limit and does not cap dollars.
 
 --fallback-provider keeps a run working when the primary provider is down or
-rate-limited: only provider-wide problems (rate limit, quota, server or
-network failure) fail over, never setup problems or bad answers. Saved
-results and event logs always name the provider that produced each answer.
+rate-limited: provider-wide problems (rate limit, quota, server or network
+failure) fail over, and an answer that is still invalid after one repair
+attempt also moves to the fallback, which faces the same prompt, schema and
+validation. Setup problems (key, model id, billing) never fail over: the run
+stops so you can fix them. Saved results and event logs always name the
+provider that produced each answer.
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ import json
 import sys
 import uuid
 from pathlib import Path
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -50,6 +55,73 @@ def load_chunks(chunks_path: Path, max_chunks: int, wanted_ids=None) -> list:
 
 PROVIDER_NAMES = {"gemini": "Gemini", "groq": "Groq", "openai": "OpenAI"}
 
+DEFAULT_CONFIG_PATH = "configs/extraction.yaml"
+
+KNOWN_FALLBACK_CAUSES = ["rate_limit", "server_error", "timeout", "schema_invalid_after_repair"]
+
+
+def load_extraction_config(config_arg):
+    """Read the extraction config yaml. Returns (config_dict, error_text).
+
+    The default path may be absent (built-in defaults then apply); an
+    explicitly passed --config path must exist.
+    """
+    config_path = Path(config_arg)
+    if not config_path.exists():
+        if config_arg != DEFAULT_CONFIG_PATH:
+            return None, f"Config file not found: {config_path}"
+        return {}, None
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as error:
+        return None, f"Config problem in {config_path}: {error}"
+    if raw is None:
+        return {}, None
+    if not isinstance(raw, dict):
+        return None, f"Config problem in {config_path}: the top level must be a mapping."
+    return raw, None
+
+
+def provider_config_entries(extraction_config):
+    """The providers list as {name: entry}; entries without a name are ignored."""
+    entries = {}
+    for entry in extraction_config.get("providers") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name.strip() != "":
+            entries[name.strip()] = entry
+    return entries
+
+
+def configured_model(provider_entries, provider):
+    """The exact model id for one provider from the config file, or None."""
+    entry = provider_entries.get(provider) or {}
+    model = entry.get("model")
+    if isinstance(model, str) and model.strip() != "":
+        return model.strip()
+    return None
+
+
+def configured_positive_number(provider_entries, provider, extraction_config, key, default):
+    """A per-provider numeric setting (timeout_s), falling back to the section
+    value, then the default. Returns (value, error_text)."""
+    entry = provider_entries.get(provider) or {}
+    value = entry.get(key, extraction_config.get(key, default))
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None, f"Config problem: {key} for {provider} must be a positive number, got {value!r}."
+    return float(value), None
+
+
+def configured_max_retries(provider_entries, provider, extraction_config):
+    """Retries AFTER the first try for the primary provider (default 2, so at
+    most 3 attempts per chunk). Returns (value, error_text)."""
+    entry = provider_entries.get(provider) or {}
+    value = entry.get("max_retries", extraction_config.get("max_retries", 2))
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None, f"Config problem: max_retries for {provider} must be a whole number 0 or more, got {value!r}."
+    return value, None
+
 
 def gate_provider(provider: str, args, max_rpm, max_tpm) -> bool:
     """Print why this provider may not be called and return False, or return True.
@@ -72,7 +144,8 @@ def gate_provider(provider: str, args, max_rpm, max_tpm) -> bool:
 
     if provider == "openai":
         if args.openai_model is None or args.openai_model.strip() == "":
-            print("--provider openai needs --openai-model with the exact model id from the OpenAI")
+            print("--provider openai needs the exact model id: --openai-model on the command line")
+            print("or an openai model entry in configs/extraction.yaml. Copy the id from the OpenAI")
             print("platform docs - for example the model line from a script that already runs for")
             print("you. This build invents no model id.")
             return False
@@ -100,16 +173,19 @@ def gate_provider(provider: str, args, max_rpm, max_tpm) -> bool:
     return True
 
 
-def build_client(provider: str, args, ontology, max_rpm, max_tpm):
+def build_client(provider: str, args, ontology, max_rpm, max_tpm, timeout_seconds):
     """Construct one provider's client after its gates passed."""
     if provider == "groq":
         return GroqClient(ontology, model_id=args.groq_model, assume_free=True,
-                          max_requests_per_minute=max_rpm, max_tokens_per_minute=max_tpm)
+                          max_requests_per_minute=max_rpm, max_tokens_per_minute=max_tpm,
+                          timeout_seconds=timeout_seconds)
     if provider == "openai":
         return OpenAIClient(ontology, model_id=args.openai_model, allow_paid=True,
-                            max_requests_per_minute=max_rpm, max_tokens_per_minute=max_tpm)
+                            max_requests_per_minute=max_rpm, max_tokens_per_minute=max_tpm,
+                            timeout_seconds=timeout_seconds)
     return GeminiClient(ontology, model_id=args.model, assume_free=True,
-                        max_requests_per_minute=max_rpm, max_tokens_per_minute=max_tpm)
+                        max_requests_per_minute=max_rpm, max_tokens_per_minute=max_tpm,
+                        timeout_seconds=timeout_seconds)
 
 
 def limit_documents(chunks: list, max_documents: int) -> list:
@@ -136,15 +212,20 @@ def main() -> int:
     parser.add_argument("--max-chunks", type=int, default=10, help="how many chunks to read this run (default 10)")
     parser.add_argument("--chunk-ids", default=None,
                         help="comma-separated chunk ids to extract instead of the first --max-chunks chunks")
-    parser.add_argument("--model", default="gemini-3.8-flash", help="Gemini model id (default: gemini-3.8-flash)")
+    parser.add_argument("--model", default=None,
+                        help="Gemini model id (default: configs/extraction.yaml, else gemini-3.8-flash)")
     parser.add_argument("--provider", default="gemini", choices=["gemini", "groq", "openai"],
                         help="which provider to call (default: gemini)")
-    parser.add_argument("--groq-model", default="openai/gpt-oss-20b", dest="groq_model",
-                        help="Groq model id, used with --provider groq (default: openai/gpt-oss-20b)")
+    parser.add_argument("--groq-model", default=None, dest="groq_model",
+                        help="Groq model id, used with --provider groq "
+                             "(default: configs/extraction.yaml, else openai/gpt-oss-20b)")
     parser.add_argument("--openai-model", default=None, dest="openai_model",
-                        help="OpenAI model id, required with --provider openai. No default: copy the "
-                             "exact id from the OpenAI platform docs or from a script that already "
-                             "runs for you. This build invents no model id.")
+                        help="OpenAI model id, required with --provider openai unless configs/extraction.yaml "
+                             "gives one. No built-in default: copy the exact id from the OpenAI platform "
+                             "docs or from a script that already runs for you. This build invents no model id.")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH,
+                        help=f"extraction settings file (default: {DEFAULT_CONFIG_PATH}). CLI flags win "
+                             "over this file; the file wins over built-in defaults.")
     parser.add_argument("--openai-allow-paid", dest="openai_allow_paid", action="store_true",
                         help="you approved paid OpenAI usage and set a spending limit in the OpenAI "
                              "platform. The flag records your approval; it does not cap dollars. "
@@ -195,6 +276,47 @@ def main() -> int:
         settings = load_settings()
     except ConfigError as error:
         print(f"Settings problem: {error}")
+        return 1
+
+    config, config_error = load_extraction_config(args.config)
+    if config_error is not None:
+        print(config_error)
+        return 1
+    extraction_config = config.get("extraction") or {}
+    if not isinstance(extraction_config, dict):
+        print("Config problem: the 'extraction' section must be a mapping.")
+        return 1
+    provider_entries = provider_config_entries(extraction_config)
+    fallback_on = extraction_config.get("fallback_on")
+    if fallback_on is None:
+        fallback_on = list(KNOWN_FALLBACK_CAUSES)
+    for cause in fallback_on:
+        if cause not in KNOWN_FALLBACK_CAUSES:
+            print(f"Config problem: fallback_on cause {cause!r} is not one of {KNOWN_FALLBACK_CAUSES}.")
+            return 1
+
+    # Model ids: a CLI flag wins over the config file, which wins over the
+    # built-in default. The exact OpenAI id comes from one of those two
+    # explicit sources only; this build invents no model id.
+    if args.model is None:
+        args.model = configured_model(provider_entries, "gemini") or "gemini-3.8-flash"
+    if args.groq_model is None:
+        args.groq_model = configured_model(provider_entries, "groq") or "openai/gpt-oss-20b"
+    if args.openai_model is None:
+        args.openai_model = configured_model(provider_entries, "openai")
+
+    max_retries, retries_error = configured_max_retries(provider_entries, args.provider, extraction_config)
+    if retries_error is not None:
+        print(retries_error)
+        return 1
+    circuit = extraction_config.get("circuit_breaker") or {}
+    circuit_failures = circuit.get("consecutive_failures", 5)
+    circuit_cooldown = circuit.get("cooldown_s", 120)
+    if not isinstance(circuit_failures, int) or isinstance(circuit_failures, bool) or circuit_failures < 1:
+        print(f"Config problem: circuit_breaker.consecutive_failures must be a whole number 1 or more, got {circuit_failures!r}.")
+        return 1
+    if isinstance(circuit_cooldown, bool) or not isinstance(circuit_cooldown, (int, float)) or circuit_cooldown <= 0:
+        print(f"Config problem: circuit_breaker.cooldown_s must be a positive number, got {circuit_cooldown!r}.")
         return 1
 
     chunks_path = settings.data_dir / "chunks" / "chunks.jsonl"
@@ -251,8 +373,14 @@ def main() -> int:
         print("0 is the safe default: nothing can be called until you choose a cap.")
         return 1
     limits = RunLimits(max_calls=settings.max_extraction_calls,
+                       max_attempts_per_chunk=max_retries + 1,
                        give_up_after_runs=args.give_up_after_runs,
-                       retry_given_up=args.retry_given_up)
+                       retry_given_up=args.retry_given_up,
+                       circuit_consecutive_failures=circuit_failures,
+                       circuit_cooldown_seconds=float(circuit_cooldown))
+    print(f"Settings: at most {max_retries + 1} attempts per chunk ({max_retries} retries), "
+          f"circuit breaker {circuit_failures} parked chunks in a row / {circuit_cooldown}s cooldown, "
+          f"fallback on {fallback_on} (from {args.config}).")
 
     providers = [args.provider]
     if args.fallback_provider is not None:
@@ -276,8 +404,13 @@ def main() -> int:
                 max_tpm = args.gemini_max_tpm
         if not gate_provider(provider, args, max_rpm, max_tpm):
             return 1
+        timeout_seconds, timeout_error = configured_positive_number(
+            provider_entries, provider, extraction_config, "timeout_s", 60)
+        if timeout_error is not None:
+            print(timeout_error)
+            return 1
         try:
-            one_client = build_client(provider, args, ontology, max_rpm, max_tpm)
+            one_client = build_client(provider, args, ontology, max_rpm, max_tpm, timeout_seconds)
         except ValueError as error:
             print(f"{PROVIDER_NAMES[provider]} setup problem: {error}")
             return 1
@@ -291,8 +424,9 @@ def main() -> int:
         primary_name = PROVIDER_NAMES[providers[0]]
         fallback_name = PROVIDER_NAMES[providers[1]]
         print(f"Fallback route: if {primary_name} hits a provider-wide problem (rate limit, quota,")
-        print(f"server or network failure), the run continues on {fallback_name} for the rest of")
-        print("the run. Setup problems (key, model id, billing) never fail over: the run stops")
+        print(f"server or network failure) or stays invalid after one repair, the run continues on")
+        print(f"{fallback_name} for the rest of the run, with the same prompt, schema and validation.")
+        print("Setup problems (key, model id, billing) never fail over: the run stops")
         print("so you can fix them. Saved results and event logs always name the provider that")
         print("actually produced each answer.")
 
