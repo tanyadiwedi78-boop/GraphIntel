@@ -281,6 +281,53 @@ def test_finished_run_repeated_makes_no_calls(ontology, tmp_path):
     assert summary["skipped_done"] == 2
 
 
+def test_done_chunk_is_not_reprocessed_on_another_provider(ontology, tmp_path):
+    """A chunk any provider extracted validly under the same recipe is done:
+    rerunning with a different model makes zero calls and says who did the work."""
+    sleep, _ = no_sleep_recorder()
+    first = FakeModel([good_answer(QUOTE)])
+    run_extraction([make_chunk(1)], first, ontology, "model-a", str(tmp_path), quick_limits(), sleep)
+    second = FakeModel([])
+    events = []
+    summary = run_extraction([make_chunk(1)], second, ontology, "model-b", str(tmp_path),
+                             quick_limits(), sleep, log_event=events.append)
+    assert summary["skipped_done"] == 1
+    assert summary["calls_used"] == 0
+    assert second.calls == []
+    assert events[0]["status"] == "skipped"
+    assert events[0]["accepted_from_model"] == "model-a"
+    # The original record stays on disk under its own provider's key.
+    assert len(list(tmp_path.glob("chunk-1__*.json"))) == 1
+
+
+def test_legacy_result_without_full_identity_is_not_accepted(ontology, tmp_path):
+    """An old record with a valid status but no recomputed identity is ignored."""
+    sleep, _ = no_sleep_recorder()
+    legacy = {"status": "valid", "entities": [], "relationships": []}
+    (tmp_path / "chunk-1__legacy.json").write_text(json.dumps(legacy), encoding="utf-8")
+    model = FakeModel([good_answer(QUOTE)])
+    summary = run_extraction([make_chunk(1)], model, ontology, "model-b", str(tmp_path),
+                             quick_limits(), sleep)
+    assert summary["calls_used"] == 1
+    assert summary["valid"] == 1
+
+
+def test_result_with_mismatched_identity_is_not_accepted(ontology, tmp_path):
+    """A record whose work key does not recompute from THIS chunk, ontology,
+    schema, prompt and its own model is ignored, never trusted."""
+    sleep, _ = no_sleep_recorder()
+    record = {"status": "valid", "model": "model-a", "work_key": "x" * 20,
+              "ontology_fingerprint": "wrong-fingerprint",
+              "schema_version": SCHEMA_VERSION, "prompt_version": PROMPT_VERSION,
+              "entities": [], "relationships": []}
+    (tmp_path / ("chunk-1__" + "x" * 20 + ".json")).write_text(json.dumps(record), encoding="utf-8")
+    model = FakeModel([good_answer(QUOTE)])
+    summary = run_extraction([make_chunk(1)], model, ontology, "model-b", str(tmp_path),
+                             quick_limits(), sleep)
+    assert summary["calls_used"] == 1
+    assert summary["valid"] == 1
+
+
 def test_crash_between_answer_and_save_repeats_that_one_call(ontology, tmp_path):
     """The honest limit: at-least-once. The provider answered, we died before saving."""
     chunks = [make_chunk(1), make_chunk(2), make_chunk(3)]
@@ -325,14 +372,25 @@ def test_changing_any_part_of_the_recipe_changes_the_key(ontology):
     assert base != make_work_key(changed, fp, "s1", "p1", "m1")
 
 
-def test_new_model_name_reruns_the_chunk(ontology, tmp_path):
-    """The model name is part of the recipe key: another model re-extracts."""
+def test_new_model_name_accepts_the_compatible_valid_record(ontology, tmp_path):
+    """Done is done, whichever model did it: another model under the same
+    recipe (chunk text, ontology, schema, prompt) accepts the valid record
+    and makes no call. The accepting run names where the record came from,
+    and the original provider's file is preserved untouched. To compare
+    providers on the same chunks, run each with its own results directory."""
     chunks = [make_chunk(1)]
     sleep, _ = no_sleep_recorder()
     run_extraction(chunks, FakeModel([good_answer(QUOTE)]), ontology, "model-a", str(tmp_path), quick_limits(), sleep)
+    files_before = sorted(os.listdir(str(tmp_path)))
     other = FakeModel([good_answer(QUOTE)])
-    run_extraction(chunks, other, ontology, "model-b", str(tmp_path), quick_limits(), sleep)
-    assert len(other.calls) == 1
+    events = []
+    summary = run_extraction(chunks, other, ontology, "model-b", str(tmp_path), quick_limits(), sleep,
+                             log_event=events.append)
+    assert len(other.calls) == 0
+    assert summary["skipped_done"] == 1
+    assert events[0]["status"] == "skipped"
+    assert events[0]["accepted_from_model"] == "model-a"
+    assert sorted(os.listdir(str(tmp_path))) == files_before  # per-provider provenance preserved
 
 
 def test_stops_after_too_many_failed_chunks_in_a_row(ontology, tmp_path):

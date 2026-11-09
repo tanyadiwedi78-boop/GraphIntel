@@ -166,6 +166,62 @@ class RunLimits:
     retry_given_up: bool = False         # True: include given-up chunks again (records are kept, never deleted)
 
 
+def find_compatible_valid(results_dir: str, chunk: dict, ontology_fingerprint: str,
+                          current_model: str) -> Optional[dict]:
+    """A valid saved result for the same chunk text and recipe from ANY provider.
+
+    Work keys include the model name, so each provider's results are saved as
+    separate files and results never mix. But a chunk that ANY provider already
+    extracted validly under the same chunk text, ontology, schema and prompt is
+    done: never redo finished work. Identity is recomputed, not trusted: the
+    record must carry a complete identity (model, work_key, ontology
+    fingerprint, schema and prompt versions, status valid), its work key must
+    equal make_work_key(this chunk's text, this fingerprint, the current schema
+    and prompt versions, the record's own model), and the filename must match.
+    Legacy or incomplete records are ignored. Provenance is preserved: the
+    accepted record stays on disk under its own provider's key and the skip
+    event names the provider that produced it.
+    """
+    prefix = chunk["chunk_id"] + "__"
+    if not os.path.isdir(results_dir):
+        return None
+    newest = None
+    newest_mtime = -1.0
+    for filename in os.listdir(results_dir):
+        if not filename.startswith(prefix) or not filename.endswith(".json"):
+            continue
+        path = os.path.join(results_dir, filename)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                record = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict) or record.get("status") != "valid":
+            continue
+        model = record.get("model")
+        if not isinstance(model, str) or model == "" or model == current_model:
+            continue
+        if record.get("ontology_fingerprint") != ontology_fingerprint:
+            continue
+        if record.get("schema_version") != SCHEMA_VERSION:
+            continue
+        if record.get("prompt_version") != PROMPT_VERSION:
+            continue
+        if not isinstance(record.get("work_key"), str):
+            continue
+        expected_key = make_work_key(chunk, ontology_fingerprint, SCHEMA_VERSION,
+                                     PROMPT_VERSION, model)
+        if record["work_key"] != expected_key:
+            continue
+        if filename != chunk["chunk_id"] + "__" + expected_key + ".json":
+            continue
+        mtime = os.path.getmtime(path)
+        if mtime > newest_mtime:
+            newest_mtime = mtime
+            newest = record
+    return newest
+
+
 def give_up(saved: Optional[dict], give_up_after_runs: int) -> bool:
     """True when a chunk's own content keeps failing across enough separate runs.
 
@@ -267,10 +323,23 @@ def run_extraction(
         work_key = make_work_key(chunk, fingerprint, SCHEMA_VERSION, PROMPT_VERSION, model_name)
 
         saved_record = load_result(results_dir, chunk_id, work_key)
+        accepted_record = None
+        accepted_from_model = None
         if saved_record is not None and saved_record.get("status") == "valid":
+            accepted_record = saved_record
+        else:
+            # Done is done, whichever provider did it: a compatible valid
+            # result (same chunk text, ontology, schema and prompt, identity
+            # recomputed) is never reprocessed on another provider.
+            compatible = find_compatible_valid(results_dir, chunk, fingerprint, model_name)
+            if compatible is not None:
+                accepted_record = compatible
+                accepted_from_model = compatible.get("model")
+        if accepted_record is not None:
             summary["skipped_done"] = summary["skipped_done"] + 1
             emit("chunk_final", chunk, status="skipped", result_reused=True,
-                attempts=0, valid_first_try=None, retries=0)
+                attempts=0, valid_first_try=None, retries=0,
+                accepted_from_model=accepted_from_model)
             continue
         if not limits.retry_given_up and give_up(saved_record, limits.give_up_after_runs):
             summary["gave_up"] = summary["gave_up"] + 1
@@ -309,6 +378,7 @@ def run_extraction(
             # inside the call, and this attempt was still served by the one
             # that received it.
             attempt_model = getattr(call_model, "model_name", model_name)
+            route_events_before = len(getattr(call_model, "route_events", []))
             call_start = clock()
             try:
                 raw_text = call_model(prompt)
@@ -343,6 +413,13 @@ def run_extraction(
                     return finish()
                 if attempt >= limits.max_attempts_per_chunk:
                     break
+                routed_away = len(getattr(call_model, "route_events", [])) > route_events_before
+                if routed_away:
+                    # The router just confirmed an outage and moved the run to
+                    # a fallback: retry at once on the new provider instead of
+                    # waiting for the one that is down, and never stop for the
+                    # old provider's long requested wait.
+                    continue
                 if error.retry_after_seconds is not None and error.retry_after_seconds > limits.max_wait_seconds:
                     summary["stopped_early"] = True
                     summary["stop_reason"] = "provider asked for a wait longer than the limit"
@@ -385,6 +462,15 @@ def run_extraction(
         # that produced the FINAL outcome of this chunk: a router may have failed
         # over mid-chunk, and provenance says who actually produced the result.
         model_name = getattr(call_model, "model_name", model_name)
+        served_work_key = make_work_key(chunk, fingerprint, SCHEMA_VERSION, PROMPT_VERSION, model_name)
+        if served_work_key != work_key:
+            # A router failed over mid-chunk: this record belongs to the
+            # provider that actually served it, so its work key embeds THAT
+            # provider's name and the file lands under that provider's key.
+            # Give-up history comes from the serving provider's own earlier
+            # record, not the one the run started with.
+            saved_record = load_result(results_dir, chunk_id, served_work_key)
+            work_key = served_work_key
         previous_runs = 0
         if saved_record is not None:
             saved_runs = saved_record.get("runs")

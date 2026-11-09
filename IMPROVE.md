@@ -90,14 +90,32 @@ Running list of changes, newest first.
   user's approval of paid usage; it is not a spending limit and does not cap dollars.
   `reasoning_effort` is sent only when configured - no per-model defaults.
 - `app/extraction/router.py` (new): `ProviderRouter` wraps a primary client and optional
-  fallbacks behind the same callable contract. Only provider-wide problems fail over
-  (429, 408, 5xx, network); setup problems (key, model id, billing - any other 4xx) and
-  content failures (cut-off answers) NEVER fail over, so a misconfiguration stops the run
-  before any fallback - including a paid one - is touched. Failover is one-way per run.
-  The failed attempt is re-raised so the runner's attempt accounting stays exact.
+  fallbacks behind the same callable contract. Only provider-wide problems are
+  route-eligible (429, 408, 5xx, network), and a first short failure never routes: a
+  per-minute rate limit waits it out on the SAME provider with the runner's normal
+  backoff. The router fails over only on a confirmed outage - the provider asked for a
+  wait longer than the wait limit (a daily quota or equivalent long stop), or it raised
+  route-eligible errors `failover_after` times in a row (default 2; a success resets the
+  count). Setup problems (key, model id, billing - any other 4xx) and content failures
+  (cut-off answers) NEVER fail over, so a misconfiguration stops the run before any
+  fallback - including a paid one - is touched. Failover is one-way per run; the next
+  run starts on the primary again. The failed attempt is re-raised so the runner's
+  attempt accounting stays exact.
 - `app/extraction/runner.py`: work keys, attempt events and saved records name the ACTIVE
-  provider per chunk and per attempt, so provenance survives a mid-run failover.
-  Single-client runs are unchanged.
+  provider per chunk and per attempt, and the work key is recomputed at save time when a
+  failover happened mid-chunk, so a saved record's key always embeds the provider that
+  actually produced it and the next run finds it again. New `find_compatible_valid`:
+  done is done, whichever provider did it - a valid record from any provider is accepted
+  for the same chunk text, ontology, schema and prompt, but only after recomputing its
+  identity (complete identity fields required, stored work key must match a fresh
+  computation, filename must match); legacy or incomplete records are never accepted.
+  The skip event names the producing provider (`accepted_from_model`) and the original
+  file stays untouched. Single-client runs are unchanged.
+- Behavior change, by design: running the same chunks with a DIFFERENT model no longer
+  re-extracts chunks that already have a compatible valid record (done chunks are never
+  redone). The old `test_new_model_name_reruns_the_chunk` was replaced by
+  `test_new_model_name_accepts_the_compatible_valid_record`. To compare providers on
+  the same chunks, give each provider its own results directory.
 - `scripts/run_extraction.py`: `--provider openai` with `--openai-model` (no default) and
   `--openai-allow-paid`; `--fallback-provider` with `--fallback-max-rpm/--fallback-max-tpm`.
   Every configured provider passes the same cost and rate-limit gates.
@@ -106,6 +124,11 @@ Running list of changes, newest first.
   setup problems, cost-gate blocks), attempts per fresh chunk, first-try valid rate,
   empty answers, and provider routing (attempts per provider, failovers, attempts served
   after failover, chunk outcomes per model).
-- Tests: `tests/test_openai_client.py`, `tests/test_router.py`, plus CLI gate and
-  summarizer tests. 208 offline tests pass on Linux (fake HTTP servers and fake clients
+- Tests: `tests/test_openai_client.py`, `tests/test_router.py` (first short 429 stays
+  same-provider, repeated failure routes, long requested wait routes at once, success
+  resets the count, setup and content failures never route, mid-chunk failover saves
+  under the serving provider's key and a rerun on the original primary makes ZERO
+  calls), plus accepted-skip tests (cross-provider zero-call skip, legacy record
+  without identity not accepted, mismatched work key not accepted), CLI gate and
+  summarizer tests. 214 offline tests pass on Linux (fake HTTP servers and fake clients
   only; no network, no real keys). No live OpenAI or fallback call has been made.
