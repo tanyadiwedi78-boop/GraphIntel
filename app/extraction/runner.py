@@ -293,7 +293,8 @@ def run_extraction(
         "stop_reason": "",
         "elapsed_seconds": 0.0,
         "processed_chunks": 0,
-        "chunks_per_minute": 0.0,
+        "chunks_per_minute": 0.0,  # processed, including failures (legacy field)
+        "valid_chunks_per_minute": 0.0,
         "chunk_median_seconds": None,
         "chunk_p95_seconds": None,
         "retry_wait_seconds": 0.0,
@@ -314,6 +315,7 @@ def run_extraction(
         summary["processed_chunks"] = fresh
         if elapsed > 0:
             summary["chunks_per_minute"] = round(fresh / elapsed * 60, 2)
+            summary["valid_chunks_per_minute"] = round(summary["valid"] / elapsed * 60, 2)
         if len(chunk_times) > 0:
             ordered = sorted(chunk_times)
             middle = len(ordered) // 2
@@ -392,6 +394,7 @@ def run_extraction(
         attempt = 0
         attempts_by_model = {}
         attempt_records = []
+        rejected_responses = []
         provider_budgets = getattr(call_model, "max_attempts", None)
         total_budget = limits.max_attempts_per_chunk
         if provider_budgets:
@@ -537,6 +540,12 @@ def run_extraction(
             validation_status = "invalid"
             if not is_valid:
                 metrics["error_type"] = "validation_failed"
+                if primary_error_type is None:
+                    primary_error_type = "schema_invalid"
+                rejected_responses.append({"attempt_number": attempt,
+                                           "model": attempt_model,
+                                           "problems": list(problems),
+                                           "raw_response": raw_text})
             if is_valid:
                 validation_status = "valid"
                 last_error_text = ""
@@ -604,6 +613,7 @@ def run_extraction(
             "provider_used": provider_used,
             "attempt_number": attempt,
             "attempt_records": attempt_records,
+            "rejected_responses": rejected_responses,
             "tokens_in": measured_token_total(attempt_records, "tokens_in"),
             "tokens_out": measured_token_total(attempt_records, "tokens_out"),
             "valid_first_try": outcome == "valid" and attempt == 1,
@@ -632,7 +642,7 @@ def run_extraction(
             record["fallback_reason"] = fallback_reason
         if primary_error_type is not None:
             record["primary_error_type"] = primary_error_type
-        if outcome == "invalid":
+        if outcome == "invalid" or (outcome == "failed" and rejected_responses):
             record["raw_response"] = raw_text
         save(results_dir, chunk_id, work_key, record)
         chunk_seconds = clock() - chunk_start

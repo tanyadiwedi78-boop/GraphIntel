@@ -232,7 +232,8 @@ def main() -> int:
     print(f"Model attempts: {attempt_count}")
     print(f"Run time total: {round(elapsed_total, 3)} s (sum of run times; time between runs is not counted)")
     if elapsed_total > 0:
-        print(f"Throughput: {round(fresh / elapsed_total * 60, 2)} fresh chunks per minute of run time")
+        print(f"Valid-result throughput: {round(status_counts.get('valid', 0) / elapsed_total * 60, 2)} valid chunks per minute (validation, not factual accuracy)")
+        print(f"Processed throughput: {round(fresh / elapsed_total * 60, 2)} fresh chunks per minute of run time (includes invalid/failed)")
     median, p95 = median_and_p95(chunk_seconds)
     if median is not None:
         print(f"Chunk time median/p95: {median} s / {p95} s")

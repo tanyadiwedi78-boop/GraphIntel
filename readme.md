@@ -123,3 +123,8 @@ python scripts/run_extraction.py --provider gemini --fallback-provider groq \
 ```
 python -m pytest
 ```
+
+Throughput labels distinguish new validator-passing results from all processed
+chunks (including failed/invalid). Neither proves factual accuracy. A mixed
+validation/provider failure keeps rejected_responses and full attempt_records;
+parked transient work does not count toward content give-up.

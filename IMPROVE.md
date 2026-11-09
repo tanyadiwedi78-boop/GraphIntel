@@ -205,3 +205,23 @@ notes above. No files or results were deleted; the same extraction flow is exten
   precision/recall/agreement or full-corpus completion. Paid approval + enforceable
   spend cap, laptop verification and reviewed labels remain required. Existing
   explicit validator is shared across providers; it is not a Pydantic validator.
+
+## 2026-11-09 - laptop mixed-failure evidence and honest throughput labels
+
+Her real chunk-059 run logged one ontology-invalid answer, then two HTTP 503s
+while sending feedback repair prompts. No repaired answer was received, so the
+repair's effectiveness is still unknown. This is not evidence of a quota error.
+- CLI now prints valid chunks/minute separately from processed chunks/minute.
+  Processed includes invalid/failed chunks; valid means validator-passing, not
+  factual accuracy. Legacy chunks_per_minute summary field stays for compatibility;
+  valid_chunks_per_minute is added. Summarizer uses the same separate labels.
+- Rejected model responses, attempt numbers, provider/model and validation problems
+  are retained in rejected_responses even when later provider failures park the
+  chunk. The last rejected raw response is retained on a mixed failed record too.
+  attempt_records already preserved the validation failure and both HTTP errors.
+- primary_error_type now preserves the first schema failure rather than losing it
+  behind later HTTP failures. The full attempt history carries both causes.
+- 241 offline tests pass, including the exact invalid-then-503-503 sequence. No
+  live calls, source/ontology edits or semantic correction. Original laptop raw
+  rejected answer cannot be recreated by this code change; only the log proves
+  the error pattern until her saved result/source is inspected.

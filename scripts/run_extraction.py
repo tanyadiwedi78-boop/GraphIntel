@@ -457,7 +457,8 @@ def main() -> int:
     print(f"Gave up on:            {summary['gave_up']} (own-content failures in 3 separate runs; rerun with --retry-given-up to include them again - records stay on disk)")
     print(f"Model calls used:      {summary['calls_used']}")
     print(f"Run time:              {summary['elapsed_seconds']} s (wall clock: calls, waiting, validation, saving)")
-    print(f"Chunks per minute:     {summary['chunks_per_minute']} (fresh chunks only; skipped chunks are not counted)")
+    print(f"Valid chunks/minute:   {summary['valid_chunks_per_minute']} (new validator-passing results, not factual accuracy)")
+    print(f"Processed chunks/min:  {summary['chunks_per_minute']} (includes invalid/failed chunks; skips excluded)")
     print(f"Chunk time median/p95: {summary['chunk_median_seconds']} s / {summary['chunk_p95_seconds']} s (fresh chunks only)")
     print(f"Retry backoff wait:    {summary['retry_wait_seconds']} s total (provider pacing waits are per attempt in the event log)")
     if summary["stopped_early"]:

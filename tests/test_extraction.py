@@ -561,3 +561,34 @@ def test_changed_recipe_tag_cannot_supply_accepted_skip(ontology, tmp_path):
                              approved_models=["gemini:model:new-recipe", "openai:other:recipe"])
     assert summary["skipped_done"] == 0
     assert len(model.calls) == 1
+
+
+def test_invalid_answer_then_two_503_preserves_rejected_answer_and_both_error_kinds(ontology, tmp_path):
+    bad = json.loads(good_answer(QUOTE))
+    bad["relationships"][0]["relation"] = "OWNS"
+    bad["entities"][1]["type"] = "Company"
+    raw = json.dumps(bad)
+    model = FakeModel([raw, ProviderError(503), ProviderError(503)])
+    sleep, waits = no_sleep_recorder()
+    ticks = iter(range(100))
+    summary = run_extraction([make_chunk(1)], model, ontology, "gemini:test:recipe",
+                             str(tmp_path), quick_limits(), sleep, clock=lambda: next(ticks))
+    assert summary["valid"] == 0
+    assert summary["valid_chunks_per_minute"] == 0
+    assert summary["chunks_per_minute"] > 0  # separate processed metric
+    assert summary["parked_transient"] == 1
+    record = json.loads(next(tmp_path.glob("*.json")).read_text())
+    assert record["status"] == "failed"
+    assert record["failure_kind"] == "transient"
+    assert record["runs"] == 0
+    assert record["primary_error_type"] == "schema_invalid"
+    assert record["raw_response"] == raw
+    assert len(record["rejected_responses"]) == 1
+    rejected = record["rejected_responses"][0]
+    assert rejected["raw_response"] == raw
+    assert rejected["attempt_number"] == 1
+    assert "not in the ontology" in rejected["problems"][0]
+    assert [event["metrics"]["error_type"] for event in record["attempt_records"]] == [
+        "validation_failed", "http_503", "http_503"]
+    assert model.calls[1] == model.calls[2]
+    assert model.calls[0] != model.calls[1]  # feedback sent, but no repaired response received
