@@ -1,7 +1,10 @@
 """Run the extraction job over the saved chunks with a real provider API.
 
-Gemini is the default provider; --provider groq uses the same runner,
-validator, cache and review tooling with a Groq model instead.
+Gemini is the default provider; --provider groq or --provider openai uses the
+same runner, validator, cache and review tooling with a Groq or OpenAI model
+instead. OpenAI has no free tier: it needs --openai-model (this build invents
+no model id) and --openai-allow-paid, which records the user's approval of
+paid usage; it is not a spending limit and does not cap dollars.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.config import ConfigError, load_settings
 from app.extraction.client import GeminiClient
 from app.extraction.groq_client import GroqClient
+from app.extraction.openai_client import OpenAIClient
 from app.extraction.runner import JsonlEvents, RunLimits, run_extraction
 from app.graph.ontology import load_ontology
 
@@ -63,10 +67,18 @@ def main() -> int:
     parser.add_argument("--chunk-ids", default=None,
                         help="comma-separated chunk ids to extract instead of the first --max-chunks chunks")
     parser.add_argument("--model", default="gemini-3.8-flash", help="Gemini model id (default: gemini-3.8-flash)")
-    parser.add_argument("--provider", default="gemini", choices=["gemini", "groq"],
+    parser.add_argument("--provider", default="gemini", choices=["gemini", "groq", "openai"],
                         help="which provider to call (default: gemini)")
     parser.add_argument("--groq-model", default="openai/gpt-oss-20b", dest="groq_model",
                         help="Groq model id, used with --provider groq (default: openai/gpt-oss-20b)")
+    parser.add_argument("--openai-model", default=None, dest="openai_model",
+                        help="OpenAI model id, required with --provider openai. No default: copy the "
+                             "exact id from the OpenAI platform docs or from a script that already "
+                             "runs for you. This build invents no model id.")
+    parser.add_argument("--openai-allow-paid", dest="openai_allow_paid", action="store_true",
+                        help="you approved paid OpenAI usage and set a spending limit in the OpenAI "
+                             "platform. The flag records your approval; it does not cap dollars. "
+                             "Required for any live OpenAI call; OpenAI has no free tier.")
     parser.add_argument("--gemini-assume-free", "--assume-free", dest="gemini_assume_free",
                         action="store_true",
                         help="you checked the provider console and this account has NO paid plan "
@@ -163,11 +175,27 @@ def main() -> int:
         provider_name = "Groq"
         limits_page = "the Groq console limits page"
         billing_check = "you checked the Groq console (Billing / Plans page)"
+    elif args.provider == "openai":
+        provider_name = "OpenAI"
+        limits_page = "your organization's limits page in the OpenAI platform"
     else:
         provider_name = "Gemini"
         limits_page = "the AI Studio rate limit page"
         billing_check = "you checked Google AI Studio (API keys / Projects page)"
-    if not args.gemini_assume_free:
+
+    if args.provider == "openai":
+        if args.openai_model is None or args.openai_model.strip() == "":
+            print("--provider openai needs --openai-model with the exact model id from the OpenAI")
+            print("platform docs - for example the model line from a script that already runs for")
+            print("you. This build invents no model id.")
+            return 1
+        if not args.openai_allow_paid:
+            print("Live OpenAI calls stay blocked until you pass --openai-allow-paid")
+            print("That flag means: you approved paid usage and set a spending limit in the")
+            print("OpenAI platform. The flag records your approval; it does not cap dollars.")
+            print("OpenAI has no free tier, so --assume-free does not apply to OpenAI.")
+            return 1
+    elif not args.gemini_assume_free:
         print(f"Live {provider_name} calls stay blocked until you pass --assume-free")
         print("(the older --gemini-assume-free name also works).")
         print(f"That flag means: {billing_check}")
@@ -190,6 +218,14 @@ def main() -> int:
                                 max_tokens_per_minute=args.gemini_max_tpm)
         except ValueError as error:
             print(f"Groq setup problem: {error}")
+            return 1
+    elif args.provider == "openai":
+        try:
+            client = OpenAIClient(ontology, model_id=args.openai_model, allow_paid=True,
+                                  max_requests_per_minute=args.gemini_max_rpm,
+                                  max_tokens_per_minute=args.gemini_max_tpm)
+        except ValueError as error:
+            print(f"OpenAI setup problem: {error}")
             return 1
     else:
         try:

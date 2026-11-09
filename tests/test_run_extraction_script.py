@@ -41,6 +41,7 @@ def run_script(data_dir, extra_args=None, extra_env=None):
     # real key, or the "no key" test would make live calls on a keyed machine.
     env["GEMINI_API_KEY"] = ""
     env["GROQ_API_KEY"] = ""
+    env["OPENAI_API_KEY"] = ""
     if extra_env is not None:
         env.update(extra_env)
     return subprocess.run(args, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
@@ -99,6 +100,36 @@ def test_groq_provider_uses_the_same_cost_gates(tmp_path):
     assert result.returncode == 1
     assert "Live Groq calls stay blocked" in result.stdout
     assert "--gemini-assume-free" in result.stdout
+
+
+def test_openai_provider_needs_its_own_key(tmp_path):
+    write_chunks(tmp_path, 3)
+    flags = GOOD_FLAGS + ["--provider", "openai", "--openai-model", "test-model-1",
+                          "--openai-allow-paid"]
+    result = run_script(tmp_path, flags)
+    assert result.returncode == 1
+    assert "OpenAI setup problem" in result.stdout
+    assert "OPENAI_API_KEY" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_openai_provider_needs_paid_approval_not_assume_free(tmp_path):
+    write_chunks(tmp_path, 3)
+    flags = ["--gemini-assume-free", "--gemini-max-rpm", "100", "--gemini-max-tpm", "100000",
+             "--provider", "openai", "--openai-model", "test-model-1"]
+    result = run_script(tmp_path, flags, {"OPENAI_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "Live OpenAI calls stay blocked" in result.stdout
+    assert "--openai-allow-paid" in result.stdout
+
+
+def test_openai_provider_needs_an_explicit_model_id(tmp_path):
+    write_chunks(tmp_path, 3)
+    flags = ["--gemini-max-rpm", "100", "--gemini-max-tpm", "100000",
+             "--provider", "openai", "--openai-allow-paid"]
+    result = run_script(tmp_path, flags, {"OPENAI_API_KEY": "fake-key"})
+    assert result.returncode == 1
+    assert "--openai-model" in result.stdout
 
 
 def test_unknown_provider_is_rejected(tmp_path):
