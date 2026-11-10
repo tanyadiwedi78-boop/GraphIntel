@@ -6,7 +6,31 @@ import json
 import math
 from typing import Dict, List, Tuple
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from app.graph.ontology import Ontology
+
+
+class EntityResponse(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    name: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+
+
+class RelationshipResponse(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    relation: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+    evidence_quote: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+
+class ExtractionResponse(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    entities: List[EntityResponse]
+    relationships: List[RelationshipResponse]
+
 
 
 def squash_spaces(text: str) -> str:
@@ -129,4 +153,10 @@ def validate_extraction(raw_text: str, chunk: dict, ontology: Ontology) -> Tuple
 
     if len(problems) > 0:
         return False, problems, [], []
+    # The explicit checks above provide readable repair feedback. The typed
+    # schema is a second shared boundary, not a replacement for ontology checks.
+    try:
+        ExtractionResponse.model_validate(data)
+    except ValidationError as error:
+        return False, ["strict response schema: " + str(error)], [], []
     return True, [], relationships, entities

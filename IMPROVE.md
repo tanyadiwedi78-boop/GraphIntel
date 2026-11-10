@@ -79,3 +79,39 @@ Running list of changes, newest first.
 - New tests: `tests/test_extraction_events.py`, `tests/test_extraction_timing.py`; restored
   `test_echo_results_are_never_reused_by_a_real_model` in `tests/test_extraction.py`.
 - Result: 109 passed on Linux, Python 3.10. Windows run pending. No live Gemini call has been made.
+
+## 2026-11-10 - Fresh Anthropic-only extraction rebuild
+
+- Reconstructed the extraction package, active CLI, source review/sample helpers,
+  summary script and independent offline tests without legacy provider imports.
+- Fable 5.2 only, Message Batches plus a shared explicit prompt-cache prefix;
+  no Gemini/OpenAI/Groq fallback in the active flow.
+- Strict JSON output schema plus local ontology/reference/evidence/confidence
+  validation. Source-defined Apple alias and false self-ownership regressions,
+  local exact duplicate prevention and normalization audit.
+- Offline immutable plans, guarded one-time submissions, terminal result import,
+  document-content cache, separately approved bounded feedback-repair batches,
+  preserved raw failures and honest per-document/chain token-cost summaries.
+- The 66 fresh-reconstruction offline tests pass without real credentials or API
+  calls. This is not evidence of live accuracy, cache-hit rate, account billing,
+  corpus throughput, global entity resolution or a completed graph/vector RAG.
+- Paid pilot and full-corpus spending remain unapproved. The reservation is a
+  deliberately conservative token-cost bound; it is not expected spend, a cash
+  deposit, or an account-wide/tax-inclusive spending guarantee.
+
+### Main integration and test migration
+
+The existing main branch still contained synchronous Gemini-runner tests. They
+are migrated to the Anthropic batch contract, not excluded from collection.
+Shared validation and standalone historical adapter tests remain active. All
+189 current tests pass offline with no skipped or hidden legacy failures.
+
+Batch claims, receipts, raw results and immutable provider status snapshots
+replace synchronous attempt callbacks. A timed-out POST is never automatically
+repeated. Repairs require a separately reviewed plan and spending approval.
+Provider created_at to ended_at gives batch elapsed wall time, including queue
+time. Missing native times remain unknown. It does not measure individual chunk
+inference latency, median/p95 latency or synchronous retry/backoff duration.
+
+This does not authorize a real-key pilot. Keep existing local changes backed up
+and use a separate clean checkout rather than resetting a modified worktree.

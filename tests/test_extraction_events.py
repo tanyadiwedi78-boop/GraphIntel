@@ -1,85 +1,68 @@
-"""Attempt and final-chunk events, including retries, reuse and zero cap."""
+"""Durable asynchronous audit records replace synchronous callback events."""
 import json
-
-from app.extraction.client import ProviderError
-from app.extraction.runner import JsonlEvents, RunLimits, run_extraction
-from app.graph.ontology import load_ontology
-from tests.fake_model import FakeModel, good_answer
-from tests.test_extraction import make_chunk, QUOTE
+import pytest
+from app.extraction.anthropic_batch import collect_job, submit_job, digest, write_new
+from tests.test_anthropic_batch import job, ontology, FakeAPI, receipt, results
 
 
-def run_with(model, tmp_path, **limits):
-    events = []
-    summary = run_extraction([make_chunk(1)], model, load_ontology("configs/ontology.json"),
-                             "event-test", str(tmp_path), RunLimits(**limits),
-                             sleep=no_wait, log_event=events.append)
-    return summary, events
+def test_claim_response_and_receipt_bind_exact_batch_before_collection(job):
+    folder, plan = job
+    reply = {"id":"msgbatch_test", "created_at":"2026-11-10T05:00:00Z"}
+    api = FakeAPI([reply])
+    submit_job(folder, plan["plan_id"], "100", True, api, max_calls=2)
+    claim = json.loads((folder / "submission-claim.json").read_text())
+    assert claim["plan_id"] == plan["plan_id"]
+    assert claim["budget_usd"] == "100"
+    assert json.loads((folder / "submission-response.txt").read_text()) == reply
+    assert json.loads((folder / "receipt.json").read_text()) == reply
+    assert len(api.calls) == 1
 
 
-def no_wait(seconds):
-    pass
+def test_pending_snapshots_are_immutable_and_do_not_submit(job):
+    folder, plan = job
+    receipt(folder)
+    one = {"id":"msgbatch_test", "processing_status":"in_progress", "request_counts":{"processing":2}}
+    two = {"id":"msgbatch_test", "processing_status":"in_progress", "request_counts":{"processing":1}}
+    api = FakeAPI([one, two, two])
+    for unused in range(3):
+        assert collect_job(folder, api)["processing_status"] == "in_progress"
+    snapshots = list(folder.glob("status-*.json"))
+    assert len(snapshots) == 2
+    assert {json.loads(p.read_text())["request_counts"]["processing"] for p in snapshots} == {1,2}
+    assert all(call[0] == "GET" for call in api.calls)
+    assert not (folder / "summary.json").exists()
 
 
-def test_invalid_then_valid_attempts_and_final(tmp_path):
-    summary, events = run_with(FakeModel(["bad", good_answer(QUOTE)]), tmp_path)
-    assert summary["valid"] == 1
-    assert len(events) == 3
-    assert events[0]["event"] == "attempt"
-    assert events[0]["status"] == "invalid"
-    assert events[1]["status"] == "valid"
-    assert events[-1]["retries"] == 1
-    assert events[-1]["valid_first_try"] is False
-    assert events[-1]["relationships"] == 1
-    assert events[-1]["entities"] == 2
-    assert events[-1]["document_id"] == "0000000000-26-000001"
-    assert events[-1]["section"] is None
+def test_zero_cap_stops_before_claim_or_network(job):
+    folder, plan = job
+    api = FakeAPI([])
+    with pytest.raises(ValueError, match="0 permits none"):
+        submit_job(folder, plan["plan_id"], "100", True, api, max_calls=0)
+    assert api.calls == []
+    assert not (folder / "submission-claim.json").exists()
 
 
-def test_reuse_emits_no_model_attempt_and_no_new_edge_counts(tmp_path):
-    run_with(FakeModel([good_answer(QUOTE)]), tmp_path)
-    summary, events = run_with(FakeModel([]), tmp_path)
-    assert summary["calls_used"] == 0
-    assert len(events) == 1
-    assert events[0]["status"] == "skipped"
-    assert events[0]["result_reused"] is True
-    assert events[0]["valid_first_try"] is None
-    assert "relationships" not in events[0]
+def test_completion_retains_one_final_record_for_each_source(job):
+    folder, plan = job
+    receipt(folder)
+    api = FakeAPI([{"id":"msgbatch_test", "processing_status":"ended"},
+                   "\n".join(json.dumps(row) for row in results(plan))])
+    summary = collect_job(folder, api)
+    assert summary["counts"] == {"valid":2}
+    saved = [json.loads(p.read_text()) for p in (folder / "extractions").glob("*.json")]
+    assert {row["chunk_id"] for row in saved} == {"c1", "c2"}
+    assert len(saved) == 2
+    assert all(row["batch_id"] == "msgbatch_test" for row in saved)
 
 
-def test_zero_cap_logs_stop_without_attempt(tmp_path):
-    summary, events = run_with(FakeModel([]), tmp_path, max_calls=0)
-    assert summary["calls_used"] == 0
-    assert len(events) == 1
-    assert events[0]["event"] == "chunk_final"
-    assert events[0]["status"] == "stopped"
-
-
-def test_setup_error_emits_attempt_and_stopped_final(tmp_path):
-    summary, events = run_with(FakeModel([ProviderError(400)]), tmp_path)
-    assert summary["stopped_early"] is True
-    assert len(events) == 2
-    assert events[0]["metrics"]["error_type"] == "http_400"
-    assert events[-1]["status"] == "stopped"
-
-
-def test_jsonl_writer_does_not_log_prompts(tmp_path):
-    path = tmp_path / "events.jsonl"
-    writer = JsonlEvents(path, "test-run")
-    writer({"event": "attempt", "prompt_tokens": None})
-    rows = path.read_text().splitlines()
-    assert len(rows) == 1
-    saved = json.loads(rows[0])
-    assert saved["run_id"] == "test-run"
-    assert saved["prompt_tokens"] is None
-    assert "prompt" not in saved
-
-
-def test_strict_validator_rejects_nonfinite_confidence_and_unhashable_types():
-    from app.extraction.validate import validate_extraction
-    ontology = load_ontology("configs/ontology.json")
-    bad = json.loads(good_answer(QUOTE))
-    bad["relationships"][0]["confidence"] = float("nan")
-    assert not validate_extraction(json.dumps(bad), make_chunk(1), ontology)[0]
-    bad = json.loads(good_answer(QUOTE))
-    bad["relationships"][0]["relation"] = []
-    assert not validate_extraction(json.dumps(bad), make_chunk(1), ontology)[0]
+def test_resume_does_not_create_new_audit_or_network_records(job):
+    folder, plan = job
+    receipt(folder)
+    api = FakeAPI([{"id":"msgbatch_test", "processing_status":"ended"},
+                   "\n".join(json.dumps(row) for row in results(plan))])
+    collect_job(folder, api)
+    before = {str(p):p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+    again = FakeAPI([])
+    collect_job(folder, again)
+    assert again.calls == []
+    assert before == {str(p):p.read_bytes() for p in folder.rglob("*") if p.is_file()}

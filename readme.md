@@ -62,3 +62,56 @@ python scripts/run_extraction.py --provider gemini --gemini-assume-free \
 ```
 python -m pytest
 ```
+
+## Anthropic-only extraction rebuild - 10 November 2026
+
+The active extraction command is now scripts/run_extraction.py with prepare,
+submit, collect and prepare-retry. It uses only claude-fable-5-2 through Message
+Batches with an explicit shared-prefix prompt cache. Earlier multi-provider
+instructions above are historical, not this command's runtime configuration.
+configs/extraction.yaml is a reference, not a source of paid authority.
+
+The generated JSON schema uses ontology enums and closed objects. Local strict
+validation still checks confidence, endpoint types and verbatim evidence.
+Source-defined Apple collective aliases and exact duplicate entities/edges are
+normalized with an audit; distinct companies are not fuzzy-merged. Cross-document
+entity resolution, embedding thresholds and Neo4j MERGE remain separate work.
+
+Prepare is offline. Submit needs a reviewed immutable plan ID, an approved USD
+job budget, positive MAX_EXTRACTION_CALLS and ANTHROPIC_API_KEY in local .env.
+There is no fallback or automatic paid retry. Prepare-retry makes an offline
+feedback plan, at most two repair rounds, for separately approved submission.
+Do not blindly repeat submit after a timeout; preserve its claim and reconcile
+with the Console. Collect resumes the existing batch and keeps raw results.
+
+Accepted results are cached by available document-chunk hash plus ontology,
+source metadata, schema, prompt and model recipe. Old results are retained,
+not rewritten. Each microbatch is at most 100 uncached chunks; repeated prepare
+advances past accepted cached chunks. API cache hits are best-effort and require
+at least 512 shared-prefix tokens for this model. Usage records distinguish
+uncached input, cache writes/reads and output including thinking.
+
+Costs are calculated from reported usage at documented batch/cache rates, not
+invoiced account totals. Missing usage stays unknown. Strict admission uses an
+intentionally conservative no-hit reservation, not an expected charge. Prices,
+account adjustments/taxes, model access and actual source quality need checking
+before any paid pilot or full corpus run. No live-model quality claim is made.
+
+Offline rebuild check: python -m pytest tests/test_anthropic_batch.py -q
+
+### Main integration and test migration
+
+The existing main branch still contained synchronous Gemini-runner tests. They
+are migrated to the Anthropic batch contract, not excluded from collection.
+Shared validation and standalone historical adapter tests remain active. All
+189 current tests pass offline with no skipped or hidden legacy failures.
+
+Batch claims, receipts, raw results and immutable provider status snapshots
+replace synchronous attempt callbacks. A timed-out POST is never automatically
+repeated. Repairs require a separately reviewed plan and spending approval.
+Provider created_at to ended_at gives batch elapsed wall time, including queue
+time. Missing native times remain unknown. It does not measure individual chunk
+inference latency, median/p95 latency or synchronous retry/backoff duration.
+
+This does not authorize a real-key pilot. Keep existing local changes backed up
+and use a separate clean checkout rather than resetting a modified worktree.

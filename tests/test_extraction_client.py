@@ -242,21 +242,13 @@ def test_dropped_connection_is_a_retryable_transport_error(client):
     assert client.last_metrics["error_type"] == "transport_or_timeout"
 
 
-def test_cut_off_chunk_fails_but_the_run_continues(client, server, tmp_path):
-    from app.extraction.runner import RunLimits, run_extraction
-    from tests.test_extraction import make_chunk
+def test_cut_off_response_retains_nonretryable_adapter_error(client, server):
+    """Legacy adapter remains inspectable but is not the active batch runner."""
     url, state = server
     state["body"] = gemini_response(status="incomplete")
-    ontology = load_ontology("configs/ontology.json")
-    summary = run_extraction([make_chunk(1), make_chunk(2)], client, ontology,
-                             client.model_name, str(tmp_path / "out"),
-                             RunLimits(max_calls=10))
-    # Each chunk got exactly one attempt: no retry with an identical request,
-    # and the first chunk's failure did not stop the run.
-    assert len(state["requests"]) == 2
-    assert summary["failed"] == 2
-    assert summary["calls_used"] == 2
-    assert summary["stopped_early"] is False
+    with pytest.raises(ChunkFailedError):
+        client("p")
+    assert len(state["requests"]) == 1
 
 
 def test_missing_key_is_refused_without_leaking(monkeypatch):
@@ -278,17 +270,7 @@ def test_recipe_changes_with_model_and_generation_limit(client):
     assert FAKE_KEY not in client.model_name
 
 
-def test_adapter_runner_and_jsonl_connected(client, tmp_path):
-    from app.extraction.runner import RunLimits, run_extraction
-    from app.extraction.runner import JsonlEvents
-    from tests.test_extraction import make_chunk
-    path = tmp_path / "events.jsonl"
-    summary = run_extraction([make_chunk(1)], client, load_ontology("configs/ontology.json"),
-                             client.model_name, str(tmp_path / "out"), RunLimits(max_calls=5),
-                             log_event=JsonlEvents(path, "run-test"))
-    assert summary["valid"] == 1  # empty relations list is a valid empty answer
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    assert rows[0]["model"].startswith("gemini:")
-    assert rows[0]["metrics"]["prompt_tokens"] == 30
-    assert rows[0]["metrics"]["cost_basis"] == "assumed_free_unverified"
-    assert rows[-1]["empty"] is True
+def test_legacy_adapter_metrics_still_capture_usage_without_runner(client):
+    assert json.loads(client("p")) == {"entities": [], "relationships": []}
+    assert client.last_metrics["prompt_tokens"] == 30
+    assert client.last_metrics["cost_basis"] == "assumed_free_unverified"

@@ -1,0 +1,11 @@
+# Active extraction is Anthropic-only; no fallback. Keys belong in local .env.
+# The reviewed immutable job plan, not this file, is the request source of truth.
+# prepare uses the fixed model/TTL below; --cache-ttl and --max-output-tokens
+# explicitly choose a different plan recipe. This file grants no paid authority.
+extraction:
+  provider: anthropic
+  model: claude-fable-5-2
+  mode: message_batches
+  prompt_cache_ttl: 1h
+  max_output_tokens: 4096
+  fallback: null

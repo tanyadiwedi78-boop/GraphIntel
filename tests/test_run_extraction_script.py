@@ -1,4 +1,4 @@
-"""CLI wiring for the Gemini-only extraction script. No network, no real API key.
+"""CLI wiring for the Anthropic-only extraction script. No network, no real API key.
 """
 import json
 import os
@@ -8,7 +8,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-GOOD_FLAGS = ["--gemini-assume-free", "--gemini-max-rpm", "100", "--gemini-max-tpm", "100000"]
+
 
 
 def write_chunks(data_dir, count):
@@ -35,44 +35,67 @@ def run_script(data_dir, extra_args=None, extra_env=None):
     env = dict(os.environ)
     env["DATA_DIR"] = str(data_dir)
     env["MAX_EXTRACTION_CALLS"] = "100"
-    env.pop("GEMINI_API_KEY", None)   # tests never see a real key
+    env.pop("ANTHROPIC_API_KEY", None)   # tests never see a real key
     if extra_env is not None:
         env.update(extra_env)
     return subprocess.run(args, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
 
 
+
+def prepare(data_dir):
+    folder = data_dir / "pilot"
+    result = run_script(data_dir, ["prepare", "--job-dir", str(folder), "--max-chunks", "2"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    return folder, json.loads((folder / "plan.json").read_text())["plan_id"]
+
+
+def submission_args(folder, plan_id):
+    return ["submit", "--job-dir", str(folder), "--approve-plan", plan_id, "--budget-usd", "100"]
+
+
 def test_missing_chunks_file_explains_what_to_do(tmp_path):
-    result = run_script(tmp_path, GOOD_FLAGS, {"GEMINI_API_KEY": "fake-key"})
+    result = run_script(tmp_path, ["prepare", "--job-dir", str(tmp_path / "pilot")])
     assert result.returncode == 1
-    assert "build_chunks" in result.stdout
+    assert "chunks" in result.stdout
+    assert "Traceback" not in result.stderr
 
 
 def test_zero_call_cap_refuses_to_run(tmp_path):
     write_chunks(tmp_path, 3)
-    result = run_script(tmp_path, GOOD_FLAGS, {"MAX_EXTRACTION_CALLS": "0", "GEMINI_API_KEY": "fake-key"})
+    folder, plan_id = prepare(tmp_path)
+    result = run_script(tmp_path, submission_args(folder, plan_id) + ["--allow-paid"], {"MAX_EXTRACTION_CALLS":"0"})
     assert result.returncode == 1
-    assert "no calls are allowed" in result.stdout
+    assert "0 permits none" in result.stdout
+    assert not (folder / "submission-claim.json").exists()
 
 
-def test_live_calls_need_the_assume_free_confirmation(tmp_path):
+def test_live_calls_need_explicit_paid_confirmation(tmp_path):
     write_chunks(tmp_path, 3)
-    flags = ["--gemini-max-rpm", "100", "--gemini-max-tpm", "100000"]
-    result = run_script(tmp_path, flags, {"GEMINI_API_KEY": "fake-key"})
+    folder, plan_id = prepare(tmp_path)
+    result = run_script(tmp_path, submission_args(folder, plan_id))
     assert result.returncode == 1
-    assert "--gemini-assume-free" in result.stdout
+    assert "explicit paid approval" in result.stdout
+    assert not (folder / "submission-claim.json").exists()
 
 
-def test_live_calls_need_explicit_rate_limits(tmp_path):
+def test_live_calls_need_reviewed_plan_and_sufficient_budget(tmp_path):
     write_chunks(tmp_path, 3)
-    result = run_script(tmp_path, ["--gemini-assume-free"], {"GEMINI_API_KEY": "fake-key"})
-    assert result.returncode == 1
-    assert "--gemini-max-rpm" in result.stdout
+    folder, plan_id = prepare(tmp_path)
+    flags = submission_args(folder, "wrong") + ["--allow-paid"]
+    result = run_script(tmp_path, flags)
+    assert result.returncode == 1 and "plan ID" in result.stdout
+    flags = submission_args(folder, plan_id) + ["--allow-paid"]
+    flags[flags.index("100")] = "0.01"
+    result = run_script(tmp_path, flags)
+    assert result.returncode == 1 and "exceeds approved job budget" in result.stdout
+    assert not (folder / "submission-claim.json").exists()
 
 
 def test_missing_api_key_is_a_setup_problem_not_a_crash(tmp_path):
     write_chunks(tmp_path, 3)
-    result = run_script(tmp_path, GOOD_FLAGS)
+    folder, plan_id = prepare(tmp_path)
+    result = run_script(tmp_path, submission_args(folder, plan_id) + ["--allow-paid"])
     assert result.returncode == 1
-    assert "Gemini setup problem" in result.stdout
-    assert "GEMINI_API_KEY" in result.stdout
+    assert "ANTHROPIC_API_KEY is missing" in result.stdout
     assert "Traceback" not in result.stderr
+    assert not (folder / "submission-claim.json").exists()

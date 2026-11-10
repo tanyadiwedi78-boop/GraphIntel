@@ -1,51 +1,21 @@
-"""Offline tests for the resumable extraction job. No network, no API key.
+"""Shared validation and error classification retained across the batch migration.
+
+Legacy synchronous job tests are replaced by the batch contract tests below and
+in test_anthropic_batch. Historical source remains in Git before this commit.
 """
-
 import json
-import os
-
 import pytest
-
-from app.extraction.client import ProviderError, backoff_seconds, classify_status, RETRY_LATER, STOP_RUN
-from app.extraction.runner import (PROMPT_VERSION, SCHEMA_VERSION, RunLimits, already_done,
-                                   load_result, make_work_key, result_path, run_extraction, save_result)
+from app.extraction.client import backoff_seconds, classify_status, RETRY_LATER, STOP_RUN
 from app.extraction.validate import validate_extraction
 from app.graph.ontology import load_ontology
-from tests.fake_model import FakeModel, good_answer
-
+from tests.fake_model import good_answer
 QUOTE = "Acme develops the Widget Engine"
-
-
+def make_chunk(number):
+    return {"chunk_id": "chunk-" + str(number), "text": "Item " + str(number) + ". " + QUOTE + " for customers.",
+            "accession": "a1", "form": "10-K", "period": "2026"}
 @pytest.fixture
 def ontology():
     return load_ontology("configs/ontology.json")
-
-
-def make_chunk(number):
-    return {
-        "chunk_id": f"chunk-{number}",
-        "text": f"Item {number}. {QUOTE} for\n customers.",
-        "accession": "0000000000-26-000001",
-        "form": "10-K",
-        "period": "2026-01-31",
-    }
-
-
-def no_sleep_recorder():
-    waits = []
-
-    def sleep(seconds):
-        waits.append(seconds)
-
-    return sleep, waits
-
-
-def quick_limits(**changes):
-    values = dict(max_calls=100, max_attempts_per_chunk=3, base_wait_seconds=1.0,
-                  max_wait_seconds=60.0, jitter_fraction=0.0, stop_after_failed_chunks=5)
-    values.update(changes)
-    return RunLimits(**values)
-
 
 # ---------- validation: provenance, not truth ----------
 
@@ -167,209 +137,109 @@ def test_backoff_doubles_and_is_capped():
     assert backoff_seconds(30, 1.0, 60.0) == 60.0
 
 
-# ---------- the job ----------
 
-def test_three_attempts_means_two_waits_then_chunk_is_failed(ontology, tmp_path):
-    model = FakeModel([ProviderError(429), ProviderError(429), ProviderError(429)])
-    sleep, waits = no_sleep_recorder()
-    summary = run_extraction([make_chunk(1)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert len(model.calls) == 3
-    assert waits == [1.0, 2.0]
-    assert summary["failed"] == 1
-    assert summary["valid"] == 0
+from tests.test_anthropic_batch import job, FakeAPI, receipt, results
+from app.extraction.anthropic_batch import (submit_job, import_results, collect_job,
+    write_new, prepare_retry, prepare_plan, digest)
 
+@pytest.mark.parametrize("error", [TimeoutError(), ConnectionError(), OSError("temporary")])
+def test_submit_transport_errors_never_auto_retry(job, error):
+    folder, plan = job
+    api = FakeAPI([error])
+    with pytest.raises(type(error)):
+        submit_job(folder, plan["plan_id"], "100", True, api, max_calls=2)
+    assert len(api.calls) == 1
+    assert (folder / "submission-claim.json").exists()
+    with pytest.raises(FileExistsError):
+        submit_job(folder, plan["plan_id"], "100", True, api, max_calls=2)
+    assert len(api.calls) == 1
 
-def test_retry_after_is_honored_when_longer_than_backoff(ontology, tmp_path):
-    model = FakeModel([ProviderError(429, retry_after_seconds=20), good_answer(QUOTE)])
-    sleep, waits = no_sleep_recorder()
-    summary = run_extraction([make_chunk(1)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert waits == [20]
-    assert summary["valid"] == 1
+@pytest.mark.parametrize("cap", [0, 1, -1, True])
+def test_call_cap_blocks_entire_batch_before_side_effect(job, cap):
+    folder, plan = job
+    api = FakeAPI([])
+    with pytest.raises(ValueError):
+        submit_job(folder, plan["plan_id"], "100", True, api, max_calls=cap)
+    assert api.calls == []
+    assert not (folder / "submission-claim.json").exists()
 
-
-def test_retry_after_longer_than_limit_stops_the_run(ontology, tmp_path):
-    model = FakeModel([ProviderError(429, retry_after_seconds=600)])
-    sleep, waits = no_sleep_recorder()
-    summary = run_extraction([make_chunk(1), make_chunk(2)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert summary["stopped_early"]
-    assert "longer than the limit" in summary["stop_reason"]
-    assert waits == []
-    assert len(model.calls) == 1
-
-
-def test_setup_error_is_not_retried_and_stops(ontology, tmp_path):
-    model = FakeModel([ProviderError(403, "bad key")])
-    sleep, waits = no_sleep_recorder()
-    summary = run_extraction([make_chunk(1), make_chunk(2)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert summary["stopped_early"]
-    assert len(model.calls) == 1
-    assert waits == []
-
-
-def test_invalid_answer_is_retried_at_once_without_waiting(ontology, tmp_path):
-    model = FakeModel(["not json", good_answer(QUOTE)])
-    sleep, waits = no_sleep_recorder()
-    summary = run_extraction([make_chunk(1)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert summary["valid"] == 1
-    assert waits == []
-    assert len(model.calls) == 2
+@pytest.mark.parametrize("reply", ["not json", '{"id":"wrong"}'])
+def test_unknown_receipt_is_retained_and_claim_blocks_repost(job, reply):
+    folder, plan = job
+    api = FakeAPI([reply])
+    with pytest.raises(ValueError):
+        submit_job(folder, plan["plan_id"], "100", True, api, max_calls=2)
+    assert (folder / "submission-response.txt").read_text() == reply
+    with pytest.raises(FileExistsError):
+        submit_job(folder, plan["plan_id"], "100", True, api, max_calls=2)
+    assert len(api.calls) == 1
 
 
-def test_invalid_after_all_attempts_is_saved_with_raw_response(ontology, tmp_path):
-    model = FakeModel(["bad1", "bad2", "bad3"])
-    sleep, _ = no_sleep_recorder()
-    summary = run_extraction([make_chunk(1)], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert summary["invalid"] == 1
-    files = os.listdir(tmp_path)
-    saved = json.load(open(os.path.join(tmp_path, files[0])))
-    assert saved["status"] == "invalid"
-    assert saved["raw_response"] == "bad3"
+def test_invalid_result_keeps_raw_and_requires_separate_repair(job):
+    folder, plan = job
+    receipt(folder)
+    rows = results(plan, "bad JSON")
+    raw = "\n".join(json.dumps(row) for row in rows)
+    (folder / "provider-results.jsonl").write_text(raw)
+    summary = import_results(folder, rows)
+    write_new(folder / "summary.json", summary)
+    repair = prepare_retry(folder)
+    assert summary["counts"] == {"invalid": 2}
+    assert repair["round"] == 1
+    assert repair["plan_id"] != plan["plan_id"]
+    assert (folder / "provider-results.jsonl").read_text() == raw
+    assert not (folder / "submission-claim.json").exists()
 
 
-def test_call_cap_stops_run_then_second_run_finishes_without_repeats(ontology, tmp_path):
-    chunks = [make_chunk(1), make_chunk(2), make_chunk(3), make_chunk(4)]
-    sleep, _ = no_sleep_recorder()
-
-    first_model = FakeModel([good_answer(QUOTE), good_answer(QUOTE)])
-    first = run_extraction(chunks, first_model, ontology, "m", str(tmp_path), quick_limits(max_calls=2), sleep)
-    assert first["valid"] == 2
-    assert first["stopped_early"] and first["stop_reason"] == "call cap reached"
-
-    second_model = FakeModel([good_answer(QUOTE), good_answer(QUOTE)])
-    second = run_extraction(chunks, second_model, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert second["skipped_done"] == 2
-    assert second["valid"] == 2
-    assert len(second_model.calls) == 2          # only the two unfinished chunks
-    assert not second["stopped_early"]
-
-
-def test_finished_run_repeated_makes_no_calls(ontology, tmp_path):
-    chunks = [make_chunk(1), make_chunk(2)]
-    sleep, _ = no_sleep_recorder()
-    run_extraction(chunks, FakeModel([good_answer(QUOTE)] * 2), ontology, "m", str(tmp_path), quick_limits(), sleep)
-    again = FakeModel([])
-    summary = run_extraction(chunks, again, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert again.calls == []
-    assert summary["skipped_done"] == 2
-
-
-def test_crash_between_answer_and_save_repeats_that_one_call(ontology, tmp_path):
-    """The honest limit: at-least-once. The provider answered, we died before saving."""
-    chunks = [make_chunk(1), make_chunk(2), make_chunk(3)]
-    sleep, _ = no_sleep_recorder()
-    saves = []
-
-    def crashing_save(results_dir, chunk_id, work_key, record):
-        if chunk_id == "chunk-2":
-            raise KeyboardInterrupt("simulated crash before the file was written")
-        save_result(results_dir, chunk_id, work_key, record)
-        saves.append(chunk_id)
-
-    first_model = FakeModel([good_answer(QUOTE), good_answer(QUOTE)])
+def test_crash_during_local_import_recovers_without_second_paid_call(job, monkeypatch):
+    import app.extraction.anthropic_batch as batch
+    folder, plan = job
+    receipt(folder)
+    raw = "\n".join(json.dumps(row) for row in results(plan))
+    api = FakeAPI([{"id": "msgbatch_test", "processing_status": "ended"}, raw])
+    original = batch.import_results
+    def crash(*args):
+        raise KeyboardInterrupt("local import interruption")
+    monkeypatch.setattr(batch, "import_results", crash)
     with pytest.raises(KeyboardInterrupt):
-        run_extraction(chunks, first_model, ontology, "m", str(tmp_path), quick_limits(), sleep, crashing_save)
-    assert len(first_model.calls) == 2           # chunk-2 WAS answered by the provider
-
-    second_model = FakeModel([good_answer(QUOTE), good_answer(QUOTE)])
-    summary = run_extraction(chunks, second_model, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert len(second_model.calls) == 2          # chunk-2 paid for twice, chunk-3 once
-    assert summary["valid"] == 2 and summary["skipped_done"] == 1
-
-
-def test_leftover_temp_file_is_ignored(ontology, tmp_path):
-    chunk = make_chunk(1)
-    key = make_work_key(chunk, ontology.fingerprint(), SCHEMA_VERSION, PROMPT_VERSION, "m")
-    open(result_path(str(tmp_path), "chunk-1", key) + ".tmp", "w").write("{half a file")
-    assert not already_done(str(tmp_path), "chunk-1", key)
+        collect_job(folder, api)
+    assert (folder / "provider-results.jsonl").read_text() == raw
+    monkeypatch.setattr(batch, "import_results", original)
+    again = FakeAPI([{"id": "msgbatch_test", "processing_status": "ended"}])
+    assert collect_job(folder, again)["counts"] == {"valid": 2}
+    assert len(again.calls) == 1 and again.calls[0][0] == "GET"
 
 
-def test_changing_any_part_of_the_recipe_changes_the_key(ontology):
-    chunk = make_chunk(1)
-    fp = ontology.fingerprint()
-    base = make_work_key(chunk, fp, "s1", "p1", "m1")
-    assert base == make_work_key(chunk, fp, "s1", "p1", "m1")
-    assert base != make_work_key(chunk, fp, "s1", "p2", "m1")
-    assert base != make_work_key(chunk, fp, "s2", "p1", "m1")
-    assert base != make_work_key(chunk, fp, "s1", "p1", "m2")
-    assert base != make_work_key(chunk, "otherfp", "s1", "p1", "m1")
-    changed = dict(chunk)
-    changed["text"] = chunk["text"] + " more"
-    assert base != make_work_key(changed, fp, "s1", "p1", "m1")
+def test_old_results_and_partial_files_stay_untouched(job, ontology, tmp_path):
+    folder, plan = job
+    cache = tmp_path / "old-cache"
+    cache.mkdir()
+    old = cache / "c1-old.json"
+    old.write_text('{"status":"valid","schema_version":"s1"}')
+    partial = cache / "unfinished.json.tmp"
+    partial.write_text("{half a file")
+    prepared = prepare_plan(tmp_path / "chunks.jsonl", ontology, 2, cache_dir=cache)
+    assert len(prepared["requests"]) == 2
+    assert old.read_text() == '{"status":"valid","schema_version":"s1"}'
+    assert partial.read_text() == "{half a file"
 
 
-def test_new_model_name_reruns_the_chunk(ontology, tmp_path):
-    """The model name is part of the recipe key: another model re-extracts."""
-    chunks = [make_chunk(1)]
-    sleep, _ = no_sleep_recorder()
-    run_extraction(chunks, FakeModel([good_answer(QUOTE)]), ontology, "model-a", str(tmp_path), quick_limits(), sleep)
-    other = FakeModel([good_answer(QUOTE)])
-    run_extraction(chunks, other, ontology, "model-b", str(tmp_path), quick_limits(), sleep)
-    assert len(other.calls) == 1
+def test_terminal_errors_do_not_hide_other_valid_chunks(job):
+    folder, plan = job
+    receipt(folder)
+    rows = results(plan)
+    rows[0]["result"] = {"type":"expired"}
+    summary = import_results(folder, rows)
+    assert summary["counts"] == {"expired":1, "valid":1}
+    assert len(list((folder / "extractions").glob("*.json"))) == 1
 
 
-def test_stops_after_too_many_failed_chunks_in_a_row(ontology, tmp_path):
-    chunks = [make_chunk(1), make_chunk(2), make_chunk(3)]
-    model = FakeModel([ProviderError(503)] * 4)
-    sleep, _ = no_sleep_recorder()
-    summary = run_extraction(
-        chunks, model, ontology, "m", str(tmp_path),
-        quick_limits(max_attempts_per_chunk=2, stop_after_failed_chunks=2), sleep,
-    )
-    assert summary["failed"] == 2
-    assert summary["stopped_early"]
-    assert len(model.calls) == 4
-
-
-def test_failed_and_invalid_results_are_tried_again_next_run(ontology, tmp_path):
-    chunks = [make_chunk(1), make_chunk(2)]
-    sleep, _ = no_sleep_recorder()
-    first = FakeModel([ProviderError(503), ProviderError(503), ProviderError(503), "bad", "bad", "bad"])
-    summary = run_extraction(chunks, first, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert summary["failed"] == 1 and summary["invalid"] == 1
-
-    second = FakeModel([good_answer(QUOTE), good_answer(QUOTE)])
-    again = run_extraction(chunks, second, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert again["valid"] == 2
-    assert again["skipped_done"] == 0
-    assert len(second.calls) == 2
-
-
-def test_old_schema_results_are_not_reused_and_stay_on_disk(ontology, tmp_path):
-    chunk = make_chunk(1)
-    old_key = make_work_key(chunk, ontology.fingerprint(), "s1", "p1", "m")
-    save_result(str(tmp_path), "chunk-1", old_key, {"status": "valid", "edges": [{"relation": "DEVELOPS"}]})
-    old_file = result_path(str(tmp_path), "chunk-1", old_key)
-
-    sleep, _ = no_sleep_recorder()
-    model = FakeModel([good_answer(QUOTE)])
-    summary = run_extraction([chunk], model, ontology, "m", str(tmp_path), quick_limits(), sleep)
-    assert len(model.calls) == 1          # re-extracted under the new schema
-    assert summary["skipped_done"] == 0
-    assert summary["valid"] == 1
-    assert os.path.exists(old_file)       # the old file is left alone
-
-
-def test_saved_record_is_readable_json_with_provenance_once(ontology, tmp_path):
-    sleep, _ = no_sleep_recorder()
-    run_extraction([make_chunk(1)], FakeModel([good_answer(QUOTE)]), ontology, "m", str(tmp_path), quick_limits(), sleep)
-    files = os.listdir(tmp_path)
-    assert len(files) == 1
-    raw = open(os.path.join(tmp_path, files[0])).read()
-    assert chr(10) in raw                 # indented, not one long line
-    saved = json.loads(raw)
-    assert saved["status"] == "valid"
-    assert saved["schema_version"] == SCHEMA_VERSION
-    # Provenance lives once on the record, not copied into every relationship.
-    assert saved["filing_accession"] == "0000000000-26-000001"
-    assert saved["form_type"] == "10-K"
-    assert saved["period"] == "2026-01-31"
-    assert saved["entities"] == [{"name": "Acme Corp", "type": "Company"},
-                                 {"name": "Widget Engine", "type": "Technology"}]
-    assert saved["relationships"] == [{
-        "relation": "DEVELOPS",
-        "source": "Acme Corp",
-        "target": "Widget Engine",
-        "evidence_quote": QUOTE,
-        "confidence": 0.9,
-    }]
-    assert "edges" not in saved
+def test_completed_collection_repeats_without_any_transport(job):
+    folder, plan = job
+    receipt(folder)
+    api = FakeAPI([{"id":"msgbatch_test", "processing_status":"ended"},
+                   "\n".join(json.dumps(row) for row in results(plan))])
+    first = collect_job(folder, api)
+    again = FakeAPI([])
+    assert collect_job(folder, again) == first
+    assert again.calls == []
