@@ -15,12 +15,15 @@ Three uses:
       Score the saved results against your labels: precision and recall for
       entities and relationships, with the wrong and the missed items listed.
 
-Fill the labels file by reading each chunk's text. "entities" lists what the
+Fill the labels file by reading each chunk's text, then set reviewed=true.
+A reviewed empty answer is a real negative example, not unfinished work.
+Unreviewed or legacy entries are never assumed reviewed. "entities" lists what the
 source really supports (name and type); "relationships" lists what the source
 really states (relation, source, target). Matching ignores upper/lower case
 and extra spaces, nothing else: if the model's name differs from yours, it
-counts as wrong and yours counts as missed, so write the name the way the
-source text writes it.
+counts as wrong and yours counts as missed. Use the canonical company name
+only when an explicit source-local alias definition supports that normalization;
+otherwise keep the source name. Never fuzzy-match distinct companies.
 """
 from __future__ import annotations
 
@@ -175,15 +178,16 @@ def run_write_labels(settings, chunk_ids: list, labels_path: Path) -> int:
     added = 0
     for chunk_id in chunk_ids:
         if chunk_id not in labels:
-            labels[chunk_id] = {"entities": [], "relationships": [], "notes": ""}
+            labels[chunk_id] = {"entities": [], "relationships": [], "notes": "", "reviewed": False}
             added = added + 1
     labels_path.parent.mkdir(parents=True, exist_ok=True)
     with open(labels_path, "w", encoding="utf-8") as f:
         json.dump(labels, f, indent=2)
         f.write("\n")
     print(f"Labels file: {labels_path} ({added} chunk entries added, {len(labels)} total)")
-    print("Fill each entry: entities have name and type; relationships have relation, source, target.")
-    print("Write names the way the source text writes them; matching ignores only case and spaces.")
+    print("Fill each entry, then set reviewed to true, including reviewed empty answers. Unreviewed entries never score.")
+    print("Use supported source-defined canonical names consistently in labels; no fuzzy alias matching is applied.")
+    print("Use canonical names only for explicit source-defined aliases; otherwise use source names. Matching ignores only case/spaces, never fuzzy company identity.")
     return 0
 
 
@@ -201,6 +205,8 @@ def check_labels_file(labels) -> list:
         if not isinstance(entry, dict):
             problems.append(f"{chunk_id}: the entry must be an object with entities and relationships lists")
             continue
+        if "reviewed" in entry and type(entry["reviewed"]) is not bool:
+            problems.append(f"{chunk_id}: reviewed must be true or false")
         for field in ["entities", "relationships"]:
             if field not in entry:
                 problems.append(f"{chunk_id}: missing the \"{field}\" list")
@@ -231,27 +237,33 @@ def run_score(settings, labels_path: Path, results_dir=None) -> int:
               "r_pred": 0, "r_correct": 0, "r_expected": 0}
     unscored = 0
     scored = 0
+    coverage = {"reviewed": 0, "unreviewed": 0, "valid": 0, "missing": 0,
+                "invalid_or_failed": 0, "incompatible": 0, "reviewed_empty": 0}
     for chunk_id in labels:
         entry = labels[chunk_id]
-        if len(entry["entities"]) == 0 and len(entry["relationships"]) == 0:
-            print(f"{chunk_id}: labels are empty - fill them in from the source text, or delete this entry. Not scored.")
-            unscored = unscored + 1
+        if entry.get("reviewed") is not True:
+            print(f"{chunk_id}: not reviewed; set reviewed=true only after checking the source. Not scored.")
+            unscored += 1
+            coverage["unreviewed"] += 1
             continue
+        coverage["reviewed"] += 1
+        totals["e_expected"] += len(entry["entities"])
+        totals["r_expected"] += len(entry["relationships"])
+        if not entry["entities"] and not entry["relationships"]:
+            coverage["reviewed_empty"] += 1
         result_path, record = find_result(results_dir, chunk_id)
+        reason = None
         if record is None:
-            print(f"{chunk_id}: no saved result yet, not scored.")
-            unscored = unscored + 1
+            reason = "missing"
+        elif record.get("prompt_version") != PROMPT_VERSION or record.get("schema_version") != SCHEMA_VERSION:
+            reason = "incompatible"
+        elif record.get("status") != "valid":
+            reason = "invalid_or_failed"
+        if reason is not None:
+            coverage[reason] += 1
+            print(f"{chunk_id}: {reason}; no accepted output, expected items count as missed in end-to-end recall.")
             continue
-        if record.get("prompt_version") != PROMPT_VERSION or record.get("schema_version") != SCHEMA_VERSION:
-            print(f"{chunk_id}: not scored - this result used prompt {record.get('prompt_version')} / schema "
-                  f"{record.get('schema_version')}, but the current code is {PROMPT_VERSION} / {SCHEMA_VERSION}. "
-                  "Re-extract the chunk first, or the numbers would mix two different recipes.")
-            unscored = unscored + 1
-            continue
-        if record.get("status") != "valid":
-            print(f"{chunk_id}: not scored - the saved result has status \"{record.get('status')}\", not valid.")
-            unscored = unscored + 1
-            continue
+        coverage["valid"] += 1
         scored = scored + 1
         print(f"{chunk_id}: scored against {result_path}")
         predicted_entities = record.get("entities", [])
@@ -274,22 +286,21 @@ def run_score(settings, labels_path: Path, results_dir=None) -> int:
             print(f"    missed: {exp.get('source')} -{exp.get('relation')}-> {exp.get('target')}")
         totals["e_pred"] = totals["e_pred"] + len(predicted_entities)
         totals["e_correct"] = totals["e_correct"] + e_correct
-        totals["e_expected"] = totals["e_expected"] + len(expected_entities)
         totals["r_pred"] = totals["r_pred"] + len(predicted_rels)
         totals["r_correct"] = totals["r_correct"] + r_correct
-        totals["r_expected"] = totals["r_expected"] + len(expected_rels)
-    if scored == 0:
-        print("=" * 60)
-        print("Nothing could be scored. Every labelled chunk was excluded above; fix the reasons and score again.")
-        return 1
     print("=" * 60)
-    print(f"Overall across {scored} scored chunks (excluded chunks change nothing below):")
+    print("Coverage:", json.dumps(coverage, sort_keys=True))
+    if coverage["reviewed"] == 0:
+        print("Nothing reviewed; no quality score. Legacy labels must be explicitly marked reviewed after checking.")
+        return 1
+    print(f"Accepted output coverage: {coverage['valid']}/{coverage['reviewed']} reviewed chunks")
+    print("Precision counts accepted predictions, including false positives on reviewed-empty chunks.")
+    print("End-to-end recall includes expected items on missing, failed and incompatible outputs as missed.")
+    print(f"Overall across {coverage['reviewed']} reviewed chunks ({scored} accepted outputs):")
     print(f"  entities: precision {ratio_text(totals['e_correct'], totals['e_pred'])}, "
-          f"recall {ratio_text(totals['e_correct'], totals['e_expected'])}")
+          f"end-to-end recall {ratio_text(totals['e_correct'], totals['e_expected'])}")
     print(f"  relationships: precision {ratio_text(totals['r_correct'], totals['r_pred'])}, "
-          f"recall {ratio_text(totals['r_correct'], totals['r_expected'])}")
-    if unscored > 0:
-        print(f"  ({unscored} labelled chunks were excluded for the reasons printed above.)")
+          f"end-to-end recall {ratio_text(totals['r_correct'], totals['r_expected'])}")
     print("Precision: of what the model extracted, how much is right. "
           "Recall: of what the source really says, how much the model found.")
     print("These numbers describe only the chunks you labeled - not the whole corpus.")

@@ -1,31 +1,17 @@
-import requests
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
+"""Model selection tests are offline. Never discover models on import."""
+from app.extraction.anthropic_batch import MODEL, message_params
+from app.graph.ontology import load_ontology
 
 
-API_KEY = os.getenv("GEMINI_API_KEY")
-print("key loaded:" , bool(API_KEY))
+def test_active_model_is_fixed_anthropic_fable():
+    assert MODEL == "claude-fable-5-2"
 
 
-url = "https://generativelanguage.googleapis.com/v1beta/models"
-
-headers = {
-    "x-goog-api-key" : API_KEY
-}
-
-response = requests.get(url,headers=headers)
-
-
-
-if response.status_code == 200:
-    data = response.json()
-
-    for model in data.get("models" , []):
-        print("model:",model["name"])
-        print("display:",model.get("displayName"))
-
-else:
-    print(response.status_code)
-    print(response.text)
+def test_model_selection_does_not_use_environment_fallback(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-not-used")
+    monkeypatch.setenv("OPENAI_MODEL", "not-authorized")
+    ontology = load_ontology("configs/ontology.json")
+    params = message_params({"text":"Cover page."}, ontology, 256, "1h")
+    assert params["model"] == MODEL
+    assert params["max_tokens"] == 256
+    assert "fallback" not in params

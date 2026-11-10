@@ -115,3 +115,38 @@ inference latency, median/p95 latency or synchronous retry/backoff duration.
 
 This does not authorize a real-key pilot. Keep existing local changes backed up
 and use a separate clean checkout rather than resetting a modified worktree.
+
+## 2026-11-10 - Honest pilot measurement follow-up
+
+- Labels now require an explicit reviewed=true after source review. Correctly
+  empty chunks are scored, so a false extraction on boilerplate is a false
+  positive. Existing labels are not silently approved. Keep supported canonical
+  names consistent in labels; only case and spaces are ignored, not fuzzy aliases.
+- Scoring shows reviewed/unreviewed, missing, invalid/failed and incompatible
+  coverage. End-to-end recall includes expected items on unavailable outputs as
+  missed. Precision describes accepted predictions, not the success rate of the
+  whole pipeline. Reviewed-empty chunks remain in accepted-output coverage.
+- Known input/output/cache fields survive incomplete billing usage. Summaries
+  name missing fields, show known subtotals and retain unknown calculated cost.
+- chain_documents includes per-document usage/cost across repair rounds, including
+  documents completed before the current round. Missing historical per-document
+  ancestry is marked incomplete and does not become an invented complete cost.
+- Plans include request-specific offline planning_estimate values with exact
+  request byte sizes, a stated four-UTF-8-bytes/token heuristic, selected cache
+  write pricing, full capped output and no assumed hits. This is uncalibrated
+  against Fable and is NOT a tokenizer count, hard bound or submit authority.
+  The strict admission reservation still applies. The low-budget pilot gate is
+  NOT solved: do not approve more spending merely to bypass it. Anthropic's own
+  token counter is an estimate without a documented numeric error bound.
+- Current official rates were checked on 10 November 2026. No token-count or
+  inference request was made to implement this change; no paid run was approved.
+- Replaced tests/test_model.py's import-time Gemini model-list HTTP probe with
+  actual offline model-selection tests. The earlier 189-test result did not prove
+  network isolation. Tests now block external DNS/socket connections before
+  collection and in Python subprocesses; localhost fake transports remain allowed.
+
+Official policy sources:
+https://platform.claude.com/docs/en/build-with-claude/token-counting
+https://platform.claude.com/docs/en/about-claude/pricing
+https://platform.claude.com/docs/en/build-with-claude/batch-processing
+https://platform.claude.com/docs/en/build-with-claude/prompt-caching

@@ -204,6 +204,34 @@ def message_params(chunk, ontology, max_tokens, ttl, feedback=None):
                 {"type": "text", "text": text}]}]}
 
 
+def planning_estimate(requests, chunks):
+    """Offline heuristic for comparison ONLY, never paid admission authority.
+
+    Four UTF-8 bytes per token is an explicit rough planning assumption, not
+    Claude's tokenizer or a bound. Request JSON includes schema and formatting.
+    No cache hits are assumed; highest selected write rate prices all input.
+    """
+    items, documents = [], {}
+    total = Decimal(0)
+    for request in requests:
+        params = request["params"]
+        ttl = params["messages"][0]["content"][0]["cache_control"]["ttl"]
+        rate = RATES["ephemeral_1h_input_tokens"] if ttl == "1h" else RATES["ephemeral_5m_input_tokens"]
+        byte_count = len(canonical(params).encode("utf-8"))
+        tokens = (byte_count + 3) // 4
+        cost = (tokens * rate + params["max_tokens"] * RATES["output_tokens"]) / Decimal(1000000)
+        document = chunks[request["custom_id"]]["accession"]
+        items.append({"custom_id": request["custom_id"], "document": document,
+                      "request_utf8_bytes": byte_count, "estimated_input_tokens": tokens,
+                      "output_token_cap": params["max_tokens"], "estimated_no_hit_cost_usd": str(cost)})
+        documents[document] = str(Decimal(documents.get(document, "0")) + cost)
+        total += cost
+    return {"kind": "offline_heuristic_not_a_bound", "can_authorize_submit": False,
+            "basis": "ceil(request JSON UTF-8 bytes / 4), all input at selected cache-write rate, full output cap, no cache hits; uncalibrated for this model",
+            "estimated_no_hit_cost_usd": str(total), "documents": documents, "requests": items,
+            "strict_admission_note": "Estimate never replaces strict reservation; low-budget submission remains blocked. Token-count endpoint is also an estimate, not a documented error bound."}
+
+
 def prepare_plan(chunks_path, ontology, max_chunks, max_tokens=4096, ttl="1h", wanted_ids=None, cache_dir=None):
     if isinstance(max_chunks, bool) or max_chunks < 1 or max_chunks > 100:
         raise ValueError("max_chunks must be from 1 to 100 (bounded-memory microbatch)")
@@ -291,6 +319,7 @@ def prepare_plan(chunks_path, ontology, max_chunks, max_tokens=4096, ttl="1h", w
         accession = chunk["accession"]
         document_reservations[accession] = str(Decimal(document_reservations.get(accession, "0")) + per_request)
     plan["document_reservations_usd"] = document_reservations
+    plan["planning_estimate"] = planning_estimate(requests, mapping)
     plan["plan_id"] = digest(plan)
     return plan
 
@@ -362,6 +391,7 @@ def prepare_retry(parent_dir):
         doc = chunk["accession"]
         docs[doc] = str(Decimal(docs.get(doc, "0")) + unit)
     next_plan["document_reservations_usd"] = docs
+    next_plan["planning_estimate"] = planning_estimate(next_plan["requests"], next_plan["chunks"])
     next_plan["plan_id"] = digest(next_plan)
     return next_plan
 
@@ -406,6 +436,8 @@ def verify_plan(plan):
     reserve = (CONTEXT_CEILING * rate + plan["max_tokens"] * RATES["output_tokens"]) * len(requests) / Decimal(1000000)
     if reserve != Decimal(plan["strict_reservation_usd"]):
         raise ValueError("reservation mismatch")
+    if "planning_estimate" in plan and plan["planning_estimate"] != planning_estimate(requests, plan["chunks"]):
+        raise ValueError("planning estimate differs from exact requests")
     return ontology
 
 
@@ -466,7 +498,7 @@ def submit_job(job_dir, approved_plan, budget_usd, allow_paid, api=None, max_cal
     budget = money(budget_usd)
     reserve = money(plan["strict_reservation_usd"])
     if reserve > budget:
-        raise ValueError("strict no-hit reservation $" + str(reserve) + " exceeds approved job budget")
+        raise ValueError("strict no-hit reservation $" + str(reserve) + " exceeds approved job budget; request-specific estimates are not guaranteed bounds and cannot authorize submission. Do not raise approval merely to bypass this gate.")
     api = api or BatchAPI()
     if plan.get("cache_dir"):
         claims = Path(plan["cache_dir"]) / "anthropic_claims"
@@ -553,7 +585,7 @@ def import_results(job_dir, rows):
               "price_source": PRICE_SOURCE, "documents": {}, "counts": {},
               "requests": [], "cache_read_input_tokens": 0,
               "cache_creation_input_tokens": 0, "reported_total_input_tokens": 0,
-              "reported_output_tokens": 0}
+              "reported_output_tokens": 0, "reported_usage": {}, "usage_missing_fields": {}}
     cost_sum = Decimal(0)
     for custom_id, chunk in plan["chunks"].items():
         row = by_id[custom_id]
@@ -563,18 +595,35 @@ def import_results(job_dir, rows):
                 "status": outcome, "calculated_cost_usd": None}
         document = chunk["accession"]
         doc = totals["documents"].setdefault(document, {"requests": 0, "calculated_cost_usd": "0",
-                                                       "unknown_cost_count": 0, "reported_usage": {}})
+                                                       "unknown_cost_count": 0, "reported_usage": {}, "usage_missing_fields": {}})
         doc["requests"] += 1
         cost = "0"  # provider docs: errored/canceled/expired requests are not billed
         if outcome == "succeeded":
             message = result["message"]
             cost = usage_cost(message.get("usage"))
             item["usage"] = message.get("usage")
-            if isinstance(message.get("usage"), dict):
-                for field in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
-                    value = message["usage"].get(field)
-                    if type(value) is int and value >= 0:
-                        doc["reported_usage"][field] = doc["reported_usage"].get(field, 0) + value
+            reported = message.get("usage")
+            fields = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+            for field in fields:
+                value = reported.get(field) if isinstance(reported, dict) else None
+                if type(value) is int and value >= 0:
+                    doc["reported_usage"][field] = doc["reported_usage"].get(field, 0) + value
+                    totals["reported_usage"][field] = totals["reported_usage"].get(field, 0) + value
+                else:
+                    for target in (doc, totals):
+                        target["usage_missing_fields"][field] = target["usage_missing_fields"].get(field, 0) + 1
+            creation = reported.get("cache_creation") if isinstance(reported, dict) else None
+            for field in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"):
+                value = creation.get(field) if isinstance(creation, dict) else None
+                if type(value) is int and value >= 0:
+                    for target in (doc, totals):
+                        target["reported_usage"][field] = target["reported_usage"].get(field, 0) + value
+                elif isinstance(reported, dict) and reported.get("cache_creation_input_tokens") == 0:
+                    for target in (doc, totals):
+                        target["reported_usage"].setdefault(field, 0)
+                else:
+                    for target in (doc, totals):
+                        target["usage_missing_fields"][field] = target["usage_missing_fields"].get(field, 0) + 1
             item["stop_reason"] = message.get("stop_reason")
             item["message_id"] = message.get("id")
             valid_stop = message.get("stop_reason") == "end_turn"
@@ -606,12 +655,6 @@ def import_results(job_dir, rows):
             record["provider_stop_reason"] = message.get("stop_reason")
             record["provider_message_id"] = message.get("id")
             record["timing_basis"] = "asynchronous batch; no per-request latency measurement"
-            if cost is not None:
-                total_input = usage["input_tokens"] + usage["cache_creation_input_tokens"] + usage["cache_read_input_tokens"]
-                totals["reported_total_input_tokens"] += total_input
-                totals["reported_output_tokens"] += usage["output_tokens"]
-                totals["cache_read_input_tokens"] += usage["cache_read_input_tokens"]
-                totals["cache_creation_input_tokens"] += usage["cache_creation_input_tokens"]
             directory = job / "extractions"
             directory.mkdir(exist_ok=True)
             path = directory / (chunk["chunk_id"] + "__" + record["work_key"] + ".json")
@@ -656,7 +699,49 @@ def import_results(job_dir, rows):
         doc["known_calculated_cost_usd"] = doc["calculated_cost_usd"]
         if doc["unknown_cost_count"]:
             doc["calculated_cost_usd"] = None
+    # Known usage is independent from whether every billing field is present.
+    known = totals["reported_usage"]
+    totals["reported_total_input_tokens"] = sum(known.get(field, 0) for field in
+        ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    totals["reported_output_tokens"] = known.get("output_tokens", 0)
+    totals["cache_read_input_tokens"] = known.get("cache_read_input_tokens", 0)
+    totals["cache_creation_input_tokens"] = known.get("cache_creation_input_tokens", 0)
+    for target in [totals] + list(totals["documents"].values()):
+        target["usage_complete"] = not bool(target["usage_missing_fields"])
+    parent_docs = {}
+    chain_complete = True
+    if plan.get("parent_job"):
+        if "chain_documents" in parent_summary:
+            parent_docs = parent_summary["chain_documents"]
+            chain_complete = parent_summary.get("chain_documents_complete", True)
+        elif plan.get("round") == 1:
+            parent_docs = parent_summary["documents"]
+        else:
+            # Historical multi-round summary has no per-document ancestry.
+            parent_docs = parent_summary["documents"]
+            chain_complete = False
+    totals["chain_documents"] = merge_document_totals(parent_docs, totals["documents"], chain_complete)
+    totals["chain_documents_complete"] = chain_complete
     return totals
+
+
+def merge_document_totals(previous, current, complete=True):
+    merged = {}
+    for document in sorted(set(previous) | set(current)):
+        rows = [source[document] for source in (previous, current) if document in source]
+        known = sum((Decimal(row.get("known_calculated_cost_usd", "0")) for row in rows), Decimal(0))
+        unknown = sum(row.get("unknown_cost_count", 0) for row in rows)
+        item = {"requests": sum(row.get("requests", 0) for row in rows),
+                "known_calculated_cost_usd": str(known), "unknown_cost_count": unknown,
+                "calculated_cost_usd": str(known) if complete and unknown == 0 and all(row.get("calculated_cost_usd") is not None for row in rows) else None,
+                "reported_usage": {}, "usage_missing_fields": {}}
+        for row in rows:
+            for key in ("reported_usage", "usage_missing_fields"):
+                for field, value in row.get(key, {}).items():
+                    item[key][field] = item[key].get(field, 0) + value
+        item["usage_complete"] = complete and all(row.get("usage_complete", not row.get("usage_missing_fields")) for row in rows)
+        merged[document] = item
+    return merged
 
 
 def batch_timing(status):
@@ -751,7 +836,8 @@ def main(argv=None):
                               "strict_reservation_usd": plan["strict_reservation_usd"],
                               "budget_scope": plan["budget_scope"], "cache_note": plan["cache_note"],
                               "document_reservations_usd": plan["document_reservations_usd"],
-                              "skipped_cached_chunks": plan["skipped_cached_chunks"]}, indent=2))
+                              "skipped_cached_chunks": plan["skipped_cached_chunks"],
+                              "planning_estimate": plan["planning_estimate"]}, indent=2))
         elif args.action == "prepare-retry":
             plan = prepare_retry(args.parent_job)
             job = Path(args.job_dir)
@@ -759,7 +845,7 @@ def main(argv=None):
             write_new(job / "plan.json", plan)
             print(json.dumps({"plan_id": plan["plan_id"], "requests": len(plan["requests"]),
                               "strict_reservation_usd": plan["strict_reservation_usd"],
-                              "round": plan["round"]}, indent=2))
+                              "round": plan["round"], "planning_estimate": plan["planning_estimate"]}, indent=2))
         else:
             # Only the normal local settings loader reads .env. Never output it.
             settings = load_settings()
