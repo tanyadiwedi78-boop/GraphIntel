@@ -2,6 +2,7 @@
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -35,7 +36,9 @@ def run_script(data_dir, extra_args=None, extra_env=None):
     env = dict(os.environ)
     env["DATA_DIR"] = str(data_dir)
     env["MAX_EXTRACTION_CALLS"] = "100"
-    env.pop("ANTHROPIC_API_KEY", None)   # tests never see a real key
+    # Keep the key present but blank: load_dotenv() must not refill it from .env.
+    # This affects only the child process, not the user's shell or saved file.
+    env["ANTHROPIC_API_KEY"] = ""
     if extra_env is not None:
         env.update(extra_env)
     return subprocess.run(args, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
@@ -99,3 +102,29 @@ def test_missing_api_key_is_a_setup_problem_not_a_crash(tmp_path):
     assert "ANTHROPIC_API_KEY is missing" in result.stdout
     assert "Traceback" not in result.stderr
     assert not (folder / "submission-claim.json").exists()
+
+
+def test_saved_dotenv_key_cannot_leak_into_missing_key_test(tmp_path, monkeypatch):
+    # Use a separate repo with a dummy saved key, never edit the user's .env.
+    isolated_repo = tmp_path / "repo"
+    isolated_repo.mkdir()
+    shutil.copytree(REPO_ROOT / "app", isolated_repo / "app")
+    (isolated_repo / "scripts").mkdir()
+    shutil.copy2(REPO_ROOT / "scripts" / "run_extraction.py",
+                 isolated_repo / "scripts" / "run_extraction.py")
+    (isolated_repo / "configs").mkdir()
+    shutil.copy2(REPO_ROOT / "configs" / "ontology.json",
+                 isolated_repo / "configs" / "ontology.json")
+    (isolated_repo / ".env").write_text(
+        "ANTHROPIC_API_KEY=dummy-saved-key-not-a-credential\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", isolated_repo)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-inherited-key-not-a-credential")
+    data_dir = tmp_path / "data"
+    write_chunks(data_dir, 3)
+    folder, plan_id = prepare(data_dir)
+    result = run_script(data_dir, submission_args(folder, plan_id) + ["--allow-paid"])
+    assert result.returncode == 1
+    assert "ANTHROPIC_API_KEY is missing" in result.stdout
+    assert "Traceback" not in result.stderr
+    assert not (folder / "submission-claim.json").exists()
+    assert not (data_dir / "extraction" / "anthropic_claims").exists()
