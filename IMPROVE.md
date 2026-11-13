@@ -178,3 +178,40 @@ https://platform.claude.com/docs/en/build-with-claude/prompt-caching
   automatic retry, new job, key change or legacy cleanup in this revision.
 - All 260 offline tests passed: the existing 236 plus 24 pilot tests for
   admission scope, altered plans, prior state, cache, timeout and one POST only.
+
+### 13 November 2026 - preserve safe HTTP diagnostics and show native timing
+
+- Confirmed bug: the CLI hid HTTP status/error type/request ID after a failed
+  submission. Preserve only fixed known enums and validated IDs with status and
+  observation time. Never echo server prose or secret-bearing bodies. Save a
+  separate diagnostic without overwriting claims, receipts or old evidence.
+- Keep claims locked, no automatic POST retry, no plan/recipe/ontology changes.
+  If diagnostic persistence fails, report the safe status and save-failed flag.
+  This improves future failures; it cannot recover an older discarded response
+  or establish the outcome/billing of the attempted local pilot.
+- Print already-stored native batch timing, with unknowns and queue-time scope.
+- All 281 offline tests pass: 260 existing plus 21 diagnostic/timing regressions.
+  No live provider requests were used for this patch. Tests are not extraction
+  benchmarks. Account access, real output review, reviewed-label quality metrics,
+  global entity resolution and Neo4j writes remain unverified or unfinished.
+
+## Phase 1 alignment of the prepared Gemini/OpenAI revision
+
+The implementation follows only architecture.md Phase 1:
+- Reuses SEC corpus/chunks and the fixed ontology.
+- Uses the requested expanded common Pydantic contract and Gemini primary /
+  separately authorized OpenAI fallback instead of the older Claude direction.
+- Separates extraction, mechanical checks, source review, global resolution and
+  Neo4j construction, all from one immutable saved output set.
+- Adds local embedding similarity with reviewed threshold calibration, persistent
+  canonical IDs, alias storage, ambiguity review and existing-node reuse.
+- Connects Neo4j registry read, version-guarded MERGE transaction and read-back.
+- Snapshots document-level call-path budgets and unknown cost explicitly; exact
+  document/prompt/schema/model cache identity avoids re-extraction. A call limit
+  is not a money cap. Actual pricing/account scope must be checked before runs.
+- Computes the requested extraction benchmark groups without further LLM calls.
+
+No Phase 2 vectors/pgvector, Phase 3 query router, Phase 4 answer generation or
+Phase 5 multi-hop benchmark was added. Offline extraction/identity fixtures are
+regression checks, not real extraction-quality, latency or cost results. The
+old failed Anthropic claim and all original saved data stay intact.
