@@ -150,3 +150,21 @@ https://platform.claude.com/docs/en/build-with-claude/token-counting
 https://platform.claude.com/docs/en/about-claude/pricing
 https://platform.claude.com/docs/en/build-with-claude/batch-processing
 https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+
+## 2026-11-13 - Bounded 1,000-request support
+
+- Raise the application batch count limit to 1,000 separate chunk requests,
+  subject to stricter explicit byte limits. No packed 1,000-chunk prompt.
+- Keep the existing schema, prompt, ontology, evidence checks, normalization,
+  deduplication, immutable plans, approval gate, cache and cost accounting.
+- Read source/results with bounded lines. Bound saved plan and batch body bytes.
+- Read saved raw JSONL twice without a database. Check complete ID coverage
+  before writing any extraction, then process one raw answer at a time by ID.
+  Keep deterministic summary order and detect changes between/during passes.
+- Bound result download size and stop before exhausting free disk. Preserve
+  partial downloads, raw results and previous outputs for recovery.
+- Add offline bounds, out-of-order coverage, interrupted-import recovery tests
+  and a separate-process synthetic memory benchmark. These prove mechanics,
+  not extraction quality, real-key access or a Windows 4GB capacity guarantee.
+- Paid pilot still blocked pending spending authority/admission policy. No
+  estimate-based override or provider call is introduced by this revision.

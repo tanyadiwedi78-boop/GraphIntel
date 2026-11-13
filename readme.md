@@ -150,3 +150,41 @@ https://platform.claude.com/docs/en/build-with-claude/token-counting
 https://platform.claude.com/docs/en/about-claude/pricing
 https://platform.claude.com/docs/en/build-with-claude/batch-processing
 https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+
+## 1,000-request batch support - 13 November 2026
+
+This revision keeps one model request and one source ID per chunk. It supports
+up to 1,000 requests in ONE batch submission, not 1,000 chunks in one prompt.
+Every request has its own token charge. The default remains 10 chunks.
+
+Local limits protect memory: 16 MiB serialized batch body, 32 MiB saved plan,
+1 MiB source JSONL line, 4 MiB result JSONL line, 256 MiB downloaded results,
+and 1,000,000 source chunks. These are deliberately below the provider limits.
+A large job is refused, never silently truncated into an incomplete batch.
+Use fewer/smaller chunks when a byte limit is reached. Source files are retained.
+
+Raw results download to a uniquely named partial file, then become a complete
+JSONL only on successful download. Collection reads this saved JSONL twice.
+The first pass checks every ID and terminal outcome, holding only seen IDs and
+a digest in RAM. The second pass validates and saves one answer at a time using
+its custom_id to find the source, never its row position. Summary metadata is
+put back into plan order. There is no SQLite/database or extra raw-result copy.
+Raw file state and content digest checks detect changes during collection.
+Do not edit raw results while collecting. If import is interrupted, run collect
+on that same unchanged job; never resubmit it.
+A partial raw download is kept for diagnosis and is not treated as complete.
+
+This does not change spending authority. The conservative strict reservation
+remains in force; the offline estimate cannot authorize a low-budget submission.
+No live extraction, factual-quality result or actual cache saving is claimed.
+
+Offline checks:
+```
+python -m pytest -q
+python scripts/benchmark_batch_memory.py --chunk-chars 2000 --answer-padding-chars 1000 --memory-limit-mib 512
+python scripts/benchmark_batch_memory.py --chunk-chars 9000 --answer-padding-chars 100000 --memory-limit-mib 512
+```
+The benchmark needs Linux/macOS resource support; the optional memory limit is
+Linux-only. It uses temporary synthetic files and blocks external networking.
+It is not a Windows laptop or real-provider benchmark. The runtime code uses
+only standard-library additions and retains the existing project dependencies.

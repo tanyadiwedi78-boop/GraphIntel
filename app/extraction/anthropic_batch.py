@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import unicodedata
 import uuid
@@ -18,6 +19,9 @@ from datetime import datetime
 from pathlib import Path
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from app.extraction.batch_storage import (MAX_REQUESTS, MAX_BATCH_BYTES,
+    MAX_PLAN_BYTES, MAX_SOURCE_LINE_BYTES, MAX_RESULT_LINE_BYTES, MAX_SOURCE_CHUNKS, MAX_RESULTS_BYTES,
+    json_lines, read_plan, checked_results)
 from app.config import load_settings
 from app.extraction.validate import ExtractionResponse
 from app.extraction.runner import (PROMPT_VERSION, SCHEMA_VERSION,
@@ -48,8 +52,11 @@ def digest(value):
 
 def write_new(path, value):
     """Never overwrite a plan, claim, receipt, snapshot or measured result."""
+    text = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    if Path(path).name == "plan.json" and len(text.encode("utf-8")) > MAX_PLAN_BYTES:
+        raise ValueError("plan exceeds local byte limit")
     with Path(path).open("x", encoding="utf-8") as handle:
-        handle.write(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+        handle.write(text)
         handle.flush()
         os.fsync(handle.fileno())
 
@@ -233,8 +240,8 @@ def planning_estimate(requests, chunks):
 
 
 def prepare_plan(chunks_path, ontology, max_chunks, max_tokens=4096, ttl="1h", wanted_ids=None, cache_dir=None):
-    if isinstance(max_chunks, bool) or max_chunks < 1 or max_chunks > 100:
-        raise ValueError("max_chunks must be from 1 to 100 (bounded-memory microbatch)")
+    if isinstance(max_chunks, bool) or max_chunks < 1 or max_chunks > MAX_REQUESTS:
+        raise ValueError("max_chunks must be from 1 to 1000 (subject to local byte limits)")
     if isinstance(max_tokens, bool) or not 1 <= max_tokens <= 128000:
         raise ValueError("max_tokens must be from 1 to 128000")
     if ttl not in ("5m", "1h"):
@@ -243,24 +250,22 @@ def prepare_plan(chunks_path, ontology, max_chunks, max_tokens=4096, ttl="1h", w
         raise ValueError("chunk IDs must be nonempty and unique")
     source_before = Path(chunks_path).stat()
     hashes, seen = {}, set()
-    with Path(chunks_path).open(encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            chunk = json.loads(line)
-            for field in ("chunk_id", "text", "accession", "form", "period"):
-                if not isinstance(chunk.get(field), str) or not chunk[field]:
-                    raise ValueError("chunk needs a nonempty string " + field)
-            if not re.fullmatch(r"[A-Za-z0-9_-]{1,180}", chunk["chunk_id"]):
-                raise ValueError("unsafe chunk ID for a result filename")
-            if chunk["chunk_id"] in seen:
-                raise ValueError("duplicate source chunk ID: " + chunk["chunk_id"])
-            seen.add(chunk["chunk_id"])
-            accession = chunk["accession"]
-            if accession not in hashes:
-                hashes[accession] = hashlib.sha256()
-            content = json.dumps([chunk["chunk_id"], chunk["text"]], ensure_ascii=False)
-            hashes[accession].update(content.encode("utf-8") + b"\n")
+    for chunk in json_lines(chunks_path, MAX_SOURCE_LINE_BYTES):
+        for field in ("chunk_id", "text", "accession", "form", "period"):
+            if not isinstance(chunk.get(field), str) or not chunk[field]:
+                raise ValueError("chunk needs a nonempty string " + field)
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,180}", chunk["chunk_id"]):
+            raise ValueError("unsafe chunk ID for a result filename")
+        if chunk["chunk_id"] in seen:
+            raise ValueError("duplicate source chunk ID: " + chunk["chunk_id"])
+        if len(seen) >= MAX_SOURCE_CHUNKS:
+            raise ValueError("source exceeds local chunk-count limit")
+        seen.add(chunk["chunk_id"])
+        accession = chunk["accession"]
+        if accession not in hashes:
+            hashes[accession] = hashlib.sha256()
+        content = json.dumps([chunk["chunk_id"], chunk["text"]], ensure_ascii=False)
+        hashes[accession].update(content.encode("utf-8") + b"\n")
     if not seen:
         raise ValueError("no source chunks")
     if wanted_ids is not None:
@@ -269,32 +274,33 @@ def prepare_plan(chunks_path, ontology, max_chunks, max_tokens=4096, ttl="1h", w
             raise ValueError("selected chunk IDs missing: " + ", ".join(sorted(missing)))
     name = model_name(max_tokens, ttl)
     requests, mapping, skipped = [], {}, []
-    with Path(chunks_path).open(encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            chunk = json.loads(line)
-            if wanted_ids is not None and chunk["chunk_id"] not in wanted_ids:
-                continue
-            chunk["document_hash"] = hashes[chunk["accession"]].hexdigest()
-            if cache_dir is not None and compatible_cache(cache_dir, chunk, ontology, name):
-                skipped.append(chunk["chunk_id"])
-                continue
-            if len(requests) >= max_chunks:
-                if wanted_ids is not None:
-                    raise ValueError("selected uncached chunk IDs exceed max_chunks")
-                break
-            key = make_work_key(chunk, ontology.fingerprint(), SCHEMA_VERSION, PROMPT_VERSION, name)
-            custom_id = "chunk_" + digest([chunk["chunk_id"], key])[:48]
-            requests.append({"custom_id": custom_id,
-                             "params": message_params(chunk, ontology, max_tokens, ttl)})
-            mapping[custom_id] = chunk
+    request_bytes = len(canonical({"requests": []}).encode("utf-8"))
+    for chunk in json_lines(chunks_path, MAX_SOURCE_LINE_BYTES):
+        if wanted_ids is not None and chunk["chunk_id"] not in wanted_ids:
+            continue
+        chunk["document_hash"] = hashes[chunk["accession"]].hexdigest()
+        if cache_dir is not None and compatible_cache(cache_dir, chunk, ontology, name):
+            skipped.append(chunk["chunk_id"])
+            continue
+        if len(requests) >= max_chunks:
+            if wanted_ids is not None:
+                raise ValueError("selected uncached chunk IDs exceed max_chunks")
+            break
+        key = make_work_key(chunk, ontology.fingerprint(), SCHEMA_VERSION, PROMPT_VERSION, name)
+        custom_id = "chunk_" + digest([chunk["chunk_id"], key])[:48]
+        request = {"custom_id": custom_id,
+                   "params": message_params(chunk, ontology, max_tokens, ttl)}
+        request_bytes += len(canonical(request).encode("utf-8")) + (1 if requests else 0)
+        if request_bytes > MAX_BATCH_BYTES:
+            raise ValueError("batch exceeds local byte limit; select fewer or smaller chunks")
+        requests.append(request)
+        mapping[custom_id] = chunk
     source_after = Path(chunks_path).stat()
     if (source_before.st_size, source_before.st_mtime_ns) != (source_after.st_size, source_after.st_mtime_ns):
         raise ValueError("source changed during preparation; no plan was created")
     body = {"requests": requests}
-    if len(canonical(body).encode("utf-8")) > 256_000_000:
-        raise ValueError("batch exceeds conservative 256 MB payload limit")
+    if len(canonical(body).encode("utf-8")) > MAX_BATCH_BYTES:
+        raise ValueError("batch exceeds local byte limit")
     # Token counting is only an estimate. For the strict admission reservation,
     # assume the entire documented context is input at the highest chosen cache
     # write rate on EVERY request, plus full capped output. No assumed cache hits.
@@ -343,7 +349,7 @@ def compatible_cache(cache_dir, chunk, ontology, name):
 def prepare_retry(parent_dir):
     """Offline, bounded repair plan. Never submits or spends automatically."""
     parent = Path(parent_dir)
-    plan = read_json(parent / "plan.json")
+    plan = read_plan(parent / "plan.json")
     ontology = verify_plan(plan)
     summary = read_json(parent / "summary.json")
     if plan.get("round", 0) >= 2:
@@ -356,31 +362,31 @@ def prepare_retry(parent_dir):
     next_plan["round"] = plan.get("round", 0) + 1
     next_plan["requests"], next_plan["chunks"], next_plan["feedback"] = [], {}, {}
     setup_errors = ("authentication_error", "permission_error", "invalid_request_error", "billing_error")
-    raw_by_id = {}
-    with (parent / "provider-results.jsonl").open(encoding="utf-8") as handle:
-        for line in handle:
-            if line.strip():
-                row = json.loads(line)
-                raw_by_id[row["custom_id"]] = row["result"]
+    summary_by_id = {}
     for result in summary["requests"]:
-        custom_id = result["custom_id"]
-        if result["status"] in ("valid", "valid_reused"):
-            continue
-        raw = raw_by_id[custom_id]
-        if raw["type"] == "errored":
-            error = raw.get("error", {})
-            detail = error.get("error", error)
-            if detail.get("type") in setup_errors:
-                raise ValueError("batch setup error; fix it before preparing another paid job")
-        chunk = plan["chunks"][custom_id]
-        feedback = result.get("problems") or []
-        if result.get("stop_reason") == "max_tokens":
-            # Same cap would likely cut off again; do not hide a budget increase.
-            raise ValueError("output cap reached; review token cap and budget before a new plan")
-        next_plan["chunks"][custom_id] = chunk
-        next_plan["feedback"][custom_id] = feedback
-        next_plan["requests"].append({"custom_id": custom_id, "params": message_params(
-            chunk, ontology, plan["max_tokens"], plan["ttl"], feedback)})
+        summary_by_id[result["custom_id"]] = result
+    raw_path = parent / "provider-results.jsonl"
+    with checked_results(raw_path, plan["chunks"]) as rows:
+        for row in rows:
+            custom_id = row["custom_id"]
+            result = summary_by_id[custom_id]
+            if result["status"] in ("valid", "valid_reused"):
+                continue
+            raw = row["result"]
+            if raw["type"] == "errored":
+                error = raw.get("error", {})
+                detail = error.get("error", error)
+                if detail.get("type") in setup_errors:
+                    raise ValueError("batch setup error; fix it before preparing another paid job")
+            chunk = plan["chunks"][custom_id]
+            feedback = result.get("problems") or []
+            if result.get("stop_reason") == "max_tokens":
+                # Same cap would likely cut off again; do not hide a budget increase.
+                raise ValueError("output cap reached; review token cap and budget before a new plan")
+            next_plan["chunks"][custom_id] = chunk
+            next_plan["feedback"][custom_id] = feedback
+            next_plan["requests"].append({"custom_id": custom_id, "params": message_params(
+                chunk, ontology, plan["max_tokens"], plan["ttl"], feedback)})
     if not next_plan["requests"]:
         raise ValueError("nothing needs a repair batch")
     next_plan["strict_reservation_usd"] = str(Decimal(plan["strict_reservation_usd"]) *
@@ -416,7 +422,9 @@ def verify_plan(plan):
     if plan.get("model_name") != model_name(plan["max_tokens"], plan["ttl"]):
         raise ValueError("model recipe mismatch")
     requests = plan["requests"]
-    if len(requests) > 100 or len(requests) != len(plan["chunks"]):
+    if len(canonical({"requests": requests}).encode("utf-8")) > MAX_BATCH_BYTES:
+        raise ValueError("batch exceeds local byte limit")
+    if len(requests) > MAX_REQUESTS or len(requests) != len(plan["chunks"]):
         raise ValueError("bad request mapping")
     ids = set()
     for request in requests:
@@ -468,10 +476,16 @@ class BatchAPI:
         partial = Path(str(destination) + ".partial-" + uuid.uuid4().hex)
         with self.opener.open(request, timeout=120) as response:
             with partial.open("xb") as handle:
+                downloaded = 0
                 while True:
                     data = response.read(65536)
                     if not data:
                         break
+                    downloaded += len(data)
+                    if downloaded > MAX_RESULTS_BYTES:
+                        raise ValueError("results exceed local byte limit; partial download preserved")
+                    if shutil.disk_usage(partial.parent).free < len(data) + 64 * 1024 * 1024:
+                        raise ValueError("not enough free disk; partial download preserved")
                     handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -482,7 +496,7 @@ class BatchAPI:
 
 def submit_job(job_dir, approved_plan, budget_usd, allow_paid, api=None, max_calls=0):
     job = Path(job_dir)
-    plan = read_json(job / "plan.json")
+    plan = read_plan(job / "plan.json")
     verify_plan(plan)
     if not allow_paid or approved_plan != plan["plan_id"]:
         raise ValueError("submission needs explicit paid approval of this plan ID")
@@ -567,18 +581,14 @@ def import_results(job_dir, rows):
     Every terminal error is preserved; no automatic resubmission or repair.
     """
     job = Path(job_dir)
-    plan = read_json(job / "plan.json")
+    plan = read_plan(job / "plan.json")
     ontology = verify_plan(plan)
-    by_id = {}
-    for row in rows:
-        custom_id = row.get("custom_id")
-        if custom_id not in plan["chunks"] or custom_id in by_id:
-            raise ValueError("unknown or duplicate batch result custom_id")
-        if row.get("result", {}).get("type") not in ("succeeded", "errored", "canceled", "expired"):
-            raise ValueError("unknown batch result type")
-        by_id[custom_id] = row
-    if set(by_id) != set(plan["chunks"]):
-        raise ValueError("incomplete batch results; no success summary written")
+    with checked_results(rows, plan["chunks"]) as checked_rows:
+        return import_checked_results(job, plan, ontology, checked_rows)
+
+
+def import_checked_results(job, plan, ontology, rows):
+    """The existing validator/accounting flow, with only one raw answer in RAM."""
     totals = {"model": MODEL, "batch_id": read_json(job / "receipt.json")["id"],
               "calculated_cost_usd": "0", "unknown_cost_count": 0,
               "cost_basis": "documented batch rates applied to reported usage, not invoice",
@@ -587,8 +597,9 @@ def import_results(job_dir, rows):
               "cache_creation_input_tokens": 0, "reported_total_input_tokens": 0,
               "reported_output_tokens": 0, "reported_usage": {}, "usage_missing_fields": {}}
     cost_sum = Decimal(0)
-    for custom_id, chunk in plan["chunks"].items():
-        row = by_id[custom_id]
+    for row in rows:
+        custom_id = row["custom_id"]
+        chunk = plan["chunks"][custom_id]
         result = row["result"]
         outcome = result["type"]
         item = {"custom_id": custom_id, "chunk_id": chunk["chunk_id"],
@@ -683,6 +694,13 @@ def import_results(job_dir, rows):
         status = item["status"]
         totals["counts"][status] = totals["counts"].get(status, 0) + 1
         totals["requests"].append(item)
+    # Provider results can arrive out of order; summary metadata follows the plan.
+    items_by_id = {}
+    for item in totals["requests"]:
+        items_by_id[item["custom_id"]] = item
+    totals["requests"] = []
+    for custom_id in plan["chunks"]:
+        totals["requests"].append(items_by_id[custom_id])
     claim_path = job / "submission-claim.json"
     claim = read_json(claim_path) if claim_path.exists() else {}
     totals["approved_job_budget_usd"] = claim.get("budget_usd")
@@ -785,16 +803,13 @@ def collect_job(job_dir, api=None):
         else:
             # Injected offline test transport only.
             raw = api.request("GET", BATCH_PATH + "/" + batch_id + "/results")
+            if len(raw.encode("utf-8")) > MAX_RESULTS_BYTES:
+                raise ValueError("results exceed local byte limit")
             with raw_path.open("x", encoding="utf-8") as handle:
                 handle.write(raw)
                 handle.flush()
                 os.fsync(handle.fileno())
-    rows = []
-    with raw_path.open(encoding="utf-8") as handle:
-        for line in handle:
-            if line.strip():
-                rows.append(json.loads(line))
-    summary = import_results(job, rows)
+    summary = import_results(job, raw_path)
     summary["batch_timing"] = batch_timing(status)
     write_new(job / "summary.json", summary)
     return summary
