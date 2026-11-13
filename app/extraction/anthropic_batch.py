@@ -494,7 +494,8 @@ class BatchAPI:
         partial.rename(destination)
 
 
-def submit_job(job_dir, approved_plan, budget_usd, allow_paid, api=None, max_calls=0):
+def submit_job(job_dir, approved_plan, budget_usd, allow_paid, api=None, max_calls=0,
+               single_request_actual_charge=False, approved_chunk_id=None):
     job = Path(job_dir)
     plan = read_plan(job / "plan.json")
     verify_plan(plan)
@@ -509,9 +510,28 @@ def submit_job(job_dir, approved_plan, budget_usd, allow_paid, api=None, max_cal
         for chunk in plan["chunks"].values():
             if compatible_cache(plan["cache_dir"], chunk, ontology, plan["model_name"]):
                 raise ValueError("a planned chunk is already valid in cache; prepare a new plan instead of paying twice")
-    budget = money(budget_usd)
     reserve = money(plan["strict_reservation_usd"])
-    if reserve > budget:
+    if single_request_actual_charge:
+        if not plan.get("cache_dir"):
+            raise ValueError("pilot requires the original shared cache/claim directory")
+        if budget_usd is not None:
+            raise ValueError("choose strict budget OR single-request actual charge, never both")
+        if (len(plan["requests"]) != 1 or plan["round"] != 0
+                or plan.get("feedback") or "parent_plan_id" in plan or "root_plan_id" in plan):
+            raise ValueError("actual-charge pilot permits one original request, no repairs")
+        chunk = next(iter(plan["chunks"].values()))
+        if not approved_chunk_id or approved_chunk_id != chunk["chunk_id"]:
+            raise ValueError("pilot needs explicit approval of this exact source chunk ID")
+        if any((job / name).exists() for name in (
+                "submission-claim.json", "submission-response.txt", "receipt.json",
+                "provider-results.jsonl", "summary.json")):
+            raise ValueError("pilot job already has submission/output state; reconcile, never retry")
+        budget = None
+    else:
+        if approved_chunk_id is not None:
+            raise ValueError("chunk approval flag is only for the single-request pilot")
+        budget = money(budget_usd)
+    if budget is not None and reserve > budget:
         raise ValueError("strict no-hit reservation $" + str(reserve) + " exceeds approved job budget; request-specific estimates are not guaranteed bounds and cannot authorize submission. Do not raise approval merely to bypass this gate.")
     api = api or BatchAPI()
     if plan.get("cache_dir"):
@@ -520,19 +540,35 @@ def submit_job(job_dir, approved_plan, budget_usd, allow_paid, api=None, max_cal
         for custom_id, chunk in plan["chunks"].items():
             claim_path = claims / (custom_id + ".json")
             if claim_path.exists():
+                if single_request_actual_charge:
+                    raise ValueError("pilot chunk already has a submission claim; reconcile, never retry")
                 old_claim = read_json(claim_path)
                 if old_claim.get("plan_id") not in (plan.get("parent_plan_id"), plan.get("root_plan_id")):
                     raise ValueError("chunk already has a submission claim; reconcile before a new paid job")
             else:
-                write_new(claim_path, {"plan_id": plan["plan_id"], "job_dir": str(job.resolve())})
+                chunk_claim = {"plan_id": plan["plan_id"], "job_dir": str(job.resolve())}
+                if single_request_actual_charge:
+                    chunk_claim.update({"admission_mode": "single_request_actual_charge_v1",
+                                        "approved_chunk_id": approved_chunk_id,
+                                        "custom_id": custom_id, "hard_usd_cap": None})
+                write_new(claim_path, chunk_claim)
             if plan.get("round", 0) > 0:
                 write_new(claims / (custom_id + "-round-" + str(plan["round"]) + ".json"),
                           {"plan_id": plan["plan_id"], "job_dir": str(job.resolve())})
     # Exclusive durable claim BEFORE network. Any interruption/unknown response
     # blocks resubmission. Reconcile with Console, never blindly repeat POST.
-    write_new(job / "submission-claim.json", {"plan_id": approved_plan,
-              "budget_usd": str(budget), "reserved_usd": str(reserve),
-              "state": "possibly_submitted_do_not_retry"})
+    claim = {"plan_id": approved_plan,
+             "budget_usd": str(budget) if budget is not None else None,
+             "reserved_usd": str(reserve),
+             "state": "possibly_submitted_do_not_retry"}
+    if single_request_actual_charge:
+        claim.update({"admission_mode": "single_request_actual_charge_v1",
+                      "approved_chunk_id": approved_chunk_id,
+                      "custom_id": plan["requests"][0]["custom_id"],
+                      "planning_estimate": plan.get("planning_estimate"),
+                      "hard_usd_cap": None,
+                      "notice": "Actual charge accepted for this one attempt; no dollar maximum, retries or repairs."})
+    write_new(job / "submission-claim.json", claim)
     raw = api.request("POST", BATCH_PATH, {"requests": plan["requests"]})
     with (job / "submission-response.txt").open("x", encoding="utf-8") as handle:
         handle.write(raw)
@@ -830,7 +866,11 @@ def main(argv=None):
     submit = sub.add_parser("submit", help="one paid batch; no auto retry, repair or fallback")
     submit.add_argument("--job-dir", required=True)
     submit.add_argument("--approve-plan", required=True)
-    submit.add_argument("--budget-usd", required=True)
+    admission = submit.add_mutually_exclusive_group(required=True)
+    admission.add_argument("--budget-usd", help="strict USD admission budget, not a provider billing cap")
+    admission.add_argument("--single-request-actual-charge", action="store_true",
+                           help="one original request only; accepts actual charge with NO hard USD cap, retries or repairs")
+    submit.add_argument("--approve-chunk-id", help="exact source chunk ID required for actual-charge pilot")
     submit.add_argument("--allow-paid", action="store_true")
     collect = sub.add_parser("collect", help="read batch state, preserve raw results, validate and measure")
     collect.add_argument("--job-dir", required=True)
@@ -866,7 +906,9 @@ def main(argv=None):
             settings = load_settings()
             if args.action == "submit":
                 result = submit_job(args.job_dir, args.approve_plan, args.budget_usd, args.allow_paid,
-                                    max_calls=settings.max_extraction_calls)
+                                    max_calls=settings.max_extraction_calls,
+                                    single_request_actual_charge=args.single_request_actual_charge,
+                                    approved_chunk_id=args.approve_chunk_id)
             else:
                 result = collect_job(args.job_dir)
             print(json.dumps(result, indent=2))

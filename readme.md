@@ -188,3 +188,27 @@ The benchmark needs Linux/macOS resource support; the optional memory limit is
 Linux-only. It uses temporary synthetic files and blocks external networking.
 It is not a Windows laptop or real-provider benchmark. The runtime code uses
 only standard-library additions and retains the existing project dependencies.
+
+### One original request with accepted actual charge - 13 November 2026
+
+The normal `submit --budget-usd` path still requires the conservative strict
+reservation. A separate `--single-request-actual-charge` option is for an
+explicitly approved single original request only. It does NOT enforce a dollar
+maximum. An estimate is not a cap or proof of authorization.
+
+This option needs `--allow-paid`, the exact saved `--approve-plan`, and
+`--approve-chunk-id` matching that plan's one source chunk. It cannot be combined
+with `--budget-usd`, multiple requests or repair plans. Keep the original plan
+unchanged. Current cache and job/global submission claims are checked before
+network. Any prior claim or submission/output state blocks this pilot; reconcile
+rather than deleting claims or retrying. The durable claim records the admission
+mode and absence of a hard USD cap. No automatic retries, repairs or fallback.
+
+This feature does not grant standing spending permission. A person's approval
+must cover the exact request and actual-charge risk before using it. A timeout
+may already have submitted the request: preserve the job and check the Console,
+never repeat submit. `collect --job-dir ...` only follows the existing batch.
+The answer, validation outcome, reported tokens, batch timing and usage-based
+calculated cost can then be reviewed; one answer is not an accuracy benchmark.
+Offline check: 260 passed, including 24 new one-request admission tests. No paid
+request was sent during implementation or testing.

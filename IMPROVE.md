@@ -168,3 +168,13 @@ https://platform.claude.com/docs/en/build-with-claude/prompt-caching
   not extraction quality, real-key access or a Windows 4GB capacity guarantee.
 - Paid pilot still blocked pending spending authority/admission policy. No
   estimate-based override or provider call is introduced by this revision.
+
+### 13 November 2026 - explicit one-request actual-charge pilot
+
+- Added mutually exclusive pilot admission, keeping ordinary strict budget
+  admission unchanged. Exact plan/chunk approvals, one original request, no
+  repairs, shared claim/cache checks, durable no-hard-cap audit fields.
+- Kept the saved plan unchanged; the estimate is not a cap. No paid call,
+  automatic retry, new job, key change or legacy cleanup in this revision.
+- All 260 offline tests passed: the existing 236 plus 24 pilot tests for
+  admission scope, altered plans, prior state, cache, timeout and one POST only.
