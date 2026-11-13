@@ -15,9 +15,10 @@ import sys
 import unicodedata
 import uuid
 from decimal import Decimal, InvalidOperation
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.error import HTTPError
 
 from app.extraction.batch_storage import (MAX_REQUESTS, MAX_BATCH_BYTES,
     MAX_PLAN_BYTES, MAX_SOURCE_LINE_BYTES, MAX_RESULT_LINE_BYTES, MAX_SOURCE_CHUNKS, MAX_RESULTS_BYTES,
@@ -449,6 +450,46 @@ def verify_plan(plan):
     return ontology
 
 
+class ProviderHTTPFailure(Exception):
+    """Only safe diagnostic fields, never server prose, prompts or credentials."""
+    def __init__(self, diagnostic):
+        self.diagnostic = diagnostic
+        super().__init__("HTTP " + str(diagnostic["http_status"]))
+
+
+def safe_http_failure(error, method, path):
+    diagnostic = {"http_status": error.code, "method": method, "path": path,
+                  "observed_at": datetime.now(timezone.utc).isoformat(),
+                  "error_type": None, "request_id": None, "error_code": None,
+                  "submission_outcome": "unreconciled_do_not_retry" if method == "POST" else "not_a_submission_attempt",
+                  "notice": "Response message/body omitted for privacy. Preserve claims; reconcile account status before any new attempt."}
+    request_id = error.headers.get("request-id") if error.headers else None
+    if isinstance(request_id, str) and re.fullmatch(r"req_[A-Za-z0-9]{1,120}", request_id):
+        diagnostic["request_id"] = request_id
+    try:
+        # A server error may echo secrets or submitted text. Only fixed known
+        # enum values and a validated request ID may leave this boundary.
+        data = json.loads(error.read(65537))
+        detail = data.get("error", {}) if isinstance(data, dict) else {}
+        if not isinstance(detail, dict):
+            detail = {}
+        known_types = {"invalid_request_error", "authentication_error", "billing_error",
+                       "permission_error", "not_found_error", "conflict_error",
+                       "request_too_large", "rate_limit_error", "api_error",
+                       "timeout_error", "overloaded_error"}
+        if detail.get("type") in known_types:
+            diagnostic["error_type"] = detail["type"]
+        body_id = data.get("request_id") if isinstance(data, dict) else None
+        if diagnostic["request_id"] is None and isinstance(body_id, str) and re.fullmatch(r"req_[A-Za-z0-9]{1,120}", body_id):
+            diagnostic["request_id"] = body_id
+        details = detail.get("details")
+        if isinstance(details, dict) and details.get("error_code") == "enforced_spend_limit_reached":
+            diagnostic["error_code"] = "enforced_spend_limit_reached"
+    except Exception:
+        pass  # HTTP status still survives malformed, oversized or unreadable bodies.
+    return ProviderHTTPFailure(diagnostic)
+
+
 class BatchAPI:
     """No redirect, automatic retry, secret logging or alternate provider."""
     def __init__(self):
@@ -464,8 +505,11 @@ class BatchAPI:
         request = Request(ORIGIN + path, data=data, method=method,
                           headers={"x-api-key": self.key, "anthropic-version": VERSION,
                                    "Content-Type": "application/json"})
-        with self.opener.open(request, timeout=120) as response:
-            return response.read().decode("utf-8")
+        try:
+            with self.opener.open(request, timeout=120) as response:
+                return response.read().decode("utf-8")
+        except HTTPError as error:
+            raise safe_http_failure(error, method, path) from None
 
 
     def download_results(self, path, destination):
@@ -474,7 +518,11 @@ class BatchAPI:
         request = Request(ORIGIN + path, headers={"x-api-key": self.key,
                           "anthropic-version": VERSION}, method="GET")
         partial = Path(str(destination) + ".partial-" + uuid.uuid4().hex)
-        with self.opener.open(request, timeout=120) as response:
+        try:
+            response = self.opener.open(request, timeout=120)
+        except HTTPError as error:
+            raise safe_http_failure(error, "GET", path) from None
+        with response:
             with partial.open("xb") as handle:
                 downloaded = 0
                 while True:
@@ -569,7 +617,17 @@ def submit_job(job_dir, approved_plan, budget_usd, allow_paid, api=None, max_cal
                       "hard_usd_cap": None,
                       "notice": "Actual charge accepted for this one attempt; no dollar maximum, retries or repairs."})
     write_new(job / "submission-claim.json", claim)
-    raw = api.request("POST", BATCH_PATH, {"requests": plan["requests"]})
+    try:
+        raw = api.request("POST", BATCH_PATH, {"requests": plan["requests"]})
+    except (HTTPError, ProviderHTTPFailure) as error:
+        failure = error if isinstance(error, ProviderHTTPFailure) else safe_http_failure(error, "POST", BATCH_PATH)
+        try:
+            write_new(job / "submission-error.json", failure.diagnostic)
+        except OSError:
+            # The original safe status must survive a full disk or an existing
+            # diagnostic file. Never overwrite prior evidence to save this one.
+            failure.diagnostic["diagnostic_save_failed"] = True
+        raise failure from None
     with (job / "submission-response.txt").open("x", encoding="utf-8") as handle:
         handle.write(raw)
         handle.flush()
@@ -914,7 +972,9 @@ def main(argv=None):
             print(json.dumps(result, indent=2))
     except Exception as error:
         # Do not print HTTP response bodies, request headers or secret values.
-        if isinstance(error, (ValueError, FileNotFoundError, FileExistsError)):
+        if isinstance(error, ProviderHTTPFailure):
+            print("Stopped:", json.dumps(error.diagnostic, indent=2))
+        elif isinstance(error, (ValueError, FileNotFoundError, FileExistsError)):
             print("Stopped:", error)
         else:
             print("Stopped:", type(error).__name__, ". Preserve the job; reconcile any submission claim before retrying.")

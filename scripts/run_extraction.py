@@ -5,4 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.extraction.anthropic_batch import main
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == 'phase1':
+        from app.extraction.pipeline import main as phase1_main
+        raise SystemExit(phase1_main(sys.argv[2:]))
     raise SystemExit(main())

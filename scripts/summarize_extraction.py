@@ -16,6 +16,12 @@ def main():
     print("Model:", summary["model"])
     print("Batch:", summary["batch_id"])
     print("Outcomes:", json.dumps(summary["counts"], sort_keys=True))
+    timing = summary.get("batch_timing") or {}
+    print("Provider batch created_at:", timing.get("created_at") or "unknown")
+    print("Provider batch ended_at:", timing.get("ended_at") or "unknown")
+    elapsed = timing.get("elapsed_seconds")
+    print("Provider batch wall time seconds:", "unknown" if elapsed is None else elapsed)
+    print("Timing scope: includes provider queue/processing; not per-chunk inference latency.")
     print("Known reported input-token subtotal:", summary["reported_total_input_tokens"])
     print("Known reported output tokens (includes thinking):", summary["reported_output_tokens"])
     print("Cache reads / writes:", summary["cache_read_input_tokens"], "/", summary["cache_creation_input_tokens"])

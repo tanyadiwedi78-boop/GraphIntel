@@ -212,3 +212,206 @@ The answer, validation outcome, reported tokens, batch timing and usage-based
 calculated cost can then be reviewed; one answer is not an accuracy benchmark.
 Offline check: 260 passed, including 24 new one-request admission tests. No paid
 request was sent during implementation or testing.
+
+### Extraction recovery and measurement limits
+
+New HTTP failures retain only the status, a known error-type enum, a validated
+request ID, an optional known spend-limit code and observation time. A failed
+submit saves those fields in `submission-error.json` when the disk permits it.
+Server error prose, request headers, API keys and prompts are not printed or
+saved in that diagnostic. Unknown fields are omitted rather than echoed. The
+safe status still prints if writing the diagnostic fails. Existing claims stay
+locked, and no HTTP failure triggers another submission. A 400 or 500 diagnostic
+alone is not a billing reconciliation. A failed GET is not a new submission.
+This cannot reconstruct an HTTP response lost by an older version.
+
+The summary command prints stored provider batch timestamps and elapsed wall
+time, including queue/processing. Missing timestamps remain unknown; this is not
+per-chunk latency or a p95 benchmark. One collected chunk can verify the pipeline,
+but cannot establish quality, cache-hit savings or 1,000-request throughput.
+
+`architecture.md` places global entity resolution and idempotent Neo4j `MERGE`
+writes inside Phase 1. They are not implemented by this extraction module.
+Source-local alias normalization and saved provenance are input to that work,
+not a replacement for embedding-threshold evaluation or graph ingestion.
+
+## Prepared Phase 1 path: Gemini primary, OpenAI fallback
+
+This local revision adds a separate, connected path. The older Anthropic command
+and its saved claims remain untouched. It does not reuse an old failed claim as
+permission to submit anything again.
+
+```
+chunks.jsonl -> immutable plan -> one Gemini request -> strict common contract
+                                  |
+                     known 429 only, separate authority + remaining call budget
+                                  -> optional OpenAI request
+validated checkpoint -> benchmark / source review -> identity review -> graph plan
+```
+
+Normal work uses one inference per uncached chunk. All later stages reuse that
+output, without an LLM judge or repair pass. Local result caching is not provider
+prompt caching. Processing many selected chunks locally is not an async provider
+Batch API request and does not promise a batch discount or free paid features.
+
+The existing `scripts/run_extraction.py` accepts the new `phase1` subcommand:
+
+```
+python scripts/run_extraction.py phase1 prepare --chunks data/chunks.jsonl --job data/phase1-v2 --gemini-model VERIFIED_MODEL_ID --max-output-tokens VERIFIED_OUTPUT_LIMIT --output data/phase1-plan-summary.json
+python scripts/run_extraction.py phase1 report --job data/phase1-v2 --output data/phase1-unmeasured-report.json
+python scripts/run_extraction.py phase1 resolve --job data/phase1-v2 --output data/phase1-resolution.json
+```
+
+`VERIFIED_MODEL_ID` and `VERIFIED_OUTPUT_LIMIT` are placeholders, not chosen
+settings. Preparing, reporting and resolving do not contact a provider or DB.
+`prepare` snapshots every selected JSONL chunk, the ontology, prompt/schema
+versions and explicit provider recipe. It refuses to overwrite an existing plan.
+
+A future authorized run needs `--execute-authorized`, an explicit total-job
+`--max-calls`, verified `--rpm` and `--tpm`, and the provider key in the environment.
+No live run was used to prepare this revision. Flags record a caller decision;
+they do not verify account eligibility or create spending permission. Call count
+is not a dollar cap. OpenAI is opt-in at prepare time via `--openai-model`, then
+requires separate `--paid-fallback-authorized` at run time. It is never attempted
+on an unknown POST outcome, an invalid answer, or an auth/billing/config failure.
+Only a known HTTP 429 can trigger it, and only within the shared call budget.
+
+The runner is deliberately sequential. It spaces requests and reserves a
+conservative UTF-8-byte input allowance plus the output ceiling in a local
+one-minute token window. This is not exact billing-token accounting or an
+account-wide quota guarantee. Other processes, daily limits and provider-specific
+reasoning/token rules still require checking before a live run. Restarting waits
+conservatively rather than bursting. `--cache PATH` enables exact-result reuse.
+
+### Quality and failure criteria
+
+- All required entity and relationship fields use one strict Pydantic schema.
+- Ontology, directed endpoints, source IDs and quote containment are checked
+  locally. Rejection does not silently prune an answer and call it correct.
+- Quote containment is not semantic evidence accuracy. Aliases, descriptions,
+  identity and claims remain unreviewed until source-bound review.
+- Each request gets an exclusive durable claim before sending and a saved raw
+  response/usage/status after it. Crashes and ambiguous outcomes never resubmit
+  automatically. A saved returned response can be recovered without a call.
+- A stale run lock, incomplete write, corrupt cache, changed plan/ontology/recipe,
+  or changed accepted checkpoint fails closed. Do not delete claims to retry.
+- Total attempt budget includes failures and fallback, across restarts. Account
+  or config failures stop the run. Long `Retry-After` instructions stop fallback
+  rather than being truncated into an early request.
+- Resume skips completed checkpoints. Cache identity includes original content,
+  document/provenance, prompt, schema, ontology and full provider recipe. A cache
+  hit is not a newly measured latency or evidence of factual correctness.
+
+### Seven benchmark groups, one set of saved outputs
+
+1. Raw strict JSON schema pass rate, with returned-output coverage.
+2. Entity precision/recall on source-hash-bound reviewed labels.
+3. Relationship precision/recall on the same reviewed chunks.
+4. Semantic evidence accuracy on explicit exact-prediction reviews, separately
+   from mechanical quote containment and review coverage.
+5. Per-attempt mean/p50/p95 request latency, including failed attempts; per-chunk
+   wall time separately includes pacing/fallback. Cache reads are not requests.
+6. Cost per 1,000 planned sample chunks only after all attempted charges are
+   known. This remains Not measured without reconciled cost, not `$0`.
+7. Known HTTP 429 responses divided by all submission attempts. Unknown status
+   keeps the result incomplete instead of quietly counting as a non-429.
+
+Use `report --labels PATH --evidence-reviews PATH` for reviewed results. Label
+files map chunk IDs to `reviewed`, `source_hash`, `entities`, `relationships`.
+`source_hash` is the SHA-256 of the canonical JSON string of original text, via
+`app.evaluation.extraction_benchmark.identity`. Evidence review files map chunk
+IDs to exact `identity(entity_or_relationship)` keys, each with `reviewed: true`,
+`source_hash`, and explicit boolean `supported`. Stale review hashes are rejected.
+No labels, cost, quota, latency, or quality numbers are invented when absent.
+Offline fixture reports identify themselves as `offline_fixture`, not a live
+Gemini/OpenAI benchmark or evidence that quality stayed unchanged.
+
+### Resolution and graph construction stay separate
+
+Resolution assigns source-local mention IDs, emits normalized name/alias match
+candidates, and does not merge them automatically. Reviewed merge files are
+lists of `{reviewed: true, mention_ids: [...]}`. Unknown, stale, overlapping and
+cross-type merge sets are rejected. This conservative implementation can leave
+cross-chunk duplicates until reviewed. It is not tuned embedding-based identity
+resolution; no arbitrary cosine threshold is presented as an identity proof.
+
+`phase1 graph --job ... --evidence-reviews ... --reviewed-merges ... --output ...`
+prepares parameterized Cypher with uniqueness constraints, source-local mentions,
+reviewed entity mappings, typed directed edges, and source-bound citation nodes.
+Entity reviews cover description/aliases as well as existence; every graph edge
+also needs a positive semantic evidence review. Unreviewed claims are blocked.
+The command saves a plan only. It does not connect to Neo4j or write anything.
+The global embedding resolver and live driver connection are described below.
+Actual threshold calibration, rollback/read-back verification on the chosen DB,
+and real model benchmark comparison remain before production Phase 1 is verified.
+
+Current API references for the prepared adapters:
+- https://ai.google.dev/gemini-api/docs/structured-output?authuser=2
+- https://developers.openai.com/api/docs/guides/structured-outputs
+- https://developers.openai.com/api/docs/api-reference/responses/create
+- https://neo4j.com/docs/cypher-manual/current/clauses/merge/
+- https://neo4j.com/docs/cypher-manual/current/syntax/parameters/
+
+### Full global-resolution and Neo4j connection
+
+The source-local `resolve` command remains a clearly marked preview, not the full ER.
+
+1. Install a small local SentenceTransformer model separately. Official examples
+   use `sentence-transformers/all-MiniLM-L6-v2`; no model was downloaded or run for
+   this build. `LocalEmbedder` requires an existing directory, disables remote
+   code/downloads, and fingerprints its files. It is optional until global ER.
+2. `phase1 calibrate --identity-pairs PAIRS --embedding-model-path MODEL_DIR ...`
+   builds a threshold from reviewed same/different identity examples. Each pair
+   includes `left`, `right`, `same_entity`, `reviewed`, and `pair_hash` equal to
+   `identity([left, right])`. Keep original source provenance in both entity
+   records. Both classes are required; overlapping scores block automatic ER.
+   Sample separation is not a promise about unseen entities. Keep held-out
+   identity labels for a real quality comparison before rollout.
+3. `phase1 registry --neo4j-uri URI --database DB ...` reads the chosen graph's
+   canonical nodes and registry version. An existing graph without this registry
+   needs migration review, not an assumed-empty local snapshot.
+4. `phase1 resolve --registry SNAPSHOT --calibration CALIBRATION
+   --embedding-model-path MODEL_DIR ...` embeds local mentions and reuses a
+   unique above-threshold canonical match. Type fences remain strict. New IDs
+   come from the resolver, never the LLM. Name/alias collisions or multiple
+   matches stop for identity review instead of producing another node.
+   `--identity-reviews PATH` can supply explicit `{reviewed: true, mention_id,
+   entity_id}` decisions. `entity_id: "new"` is an explicit reviewed distinct
+   identity, not an automatic escape from an ambiguous match.
+5. `phase1 graph --global-resolution RESOLUTION --evidence-reviews REVIEWS ...`
+   exports the reviewed global plan, including canonical aliases and typed edges.
+6. `phase1 write --global-resolution RESOLUTION --evidence-reviews REVIEWS
+   --neo4j-uri URI --database DB --write-authorized ...` is the explicit driver
+   connection. Credentials are read from `NEO4J_USERNAME`/`NEO4J_PASSWORD`, never
+   written into artifacts. Do not use it until target/access and write authority
+   are verified. `--schema-authorized` separately permits required constraints.
+
+The writer checks exact uniqueness-constraint definitions, target identity, and
+registry version. It rebuilds Cypher from reviewed records instead of accepting
+model-generated queries. An explicit non-retried transaction locks the registry,
+rejects a stale snapshot, writes MERGEs, and increments its version. Read-back
+checks canonical properties/aliases and typed edge endpoints/IDs. An unknown
+commit acknowledgement or read-back mismatch requires reconciliation, not retry.
+DDL may remain after a rolled-back data transaction; it is separately authorized.
+The same canonical IDs are reused on re-ingestion after a fresh registry read.
+
+These connections are implemented and offline exercised, not live-DB verified.
+No real embedding calibration, account quota verification, provider comparison,
+Neo4j commit or rollback proof has been manufactured. They are the remaining
+real-run checks, not extra architecture phases.
+
+### Reconciled cost without changing raw outputs
+
+`report --cost-ledger PATH` accepts a separate JSON mapping of exact
+`identity(saved_attempt_result)` to `{reviewed: true, cost_usd: "0.00",
+billing_reference: "actual provider billing record"}`. Include every attempt,
+not just successes. Use a zero only when the actual charge is confirmed zero.
+Missing, stale or unreconciled entries leave cost Not measured. This ledger is
+measurement evidence, not spending permission, and never edits raw checkpoints.
+
+Identity threshold calibration uses same-type matches and nonmatches. Cross-type
+pairs are not useful calibration negatives because the resolver filters types
+before similarity. The verified package ranges are SentenceTransformers3.4.1
+within major3 and Neo4j5.28.8 within major5. CPU-only Torch installation is a
+separate environment choice; do not assume a generic install is small or that a
+pretrained model has the tiny smoke model's memory footprint.

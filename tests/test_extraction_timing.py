@@ -36,3 +36,21 @@ def test_collection_persists_native_wall_time_and_resume_does_not_remeasure(job)
     assert collect_job(folder, FakeAPI([]))["batch_timing"] == summary["batch_timing"]
     assert len(api.calls) == 2
     assert all(call[0] == "GET" for call in api.calls)
+
+
+@pytest.mark.parametrize('elapsed', [None, 0, 180])
+def test_summary_cli_reports_native_time_or_unknown(job, monkeypatch, capsys, elapsed):
+    from scripts import summarize_extraction
+    folder, plan = job
+    receipt(folder)
+    status = {'id':'msgbatch_test', 'processing_status':'ended'}
+    if elapsed is not None:
+        status.update(created_at='2026-11-10T05:00:00Z',
+                      ended_at='2026-11-10T05:03:00Z' if elapsed else '2026-11-10T05:00:00Z')
+    collect_job(folder, FakeAPI([status, '\n'.join(json.dumps(row) for row in results(plan))]))
+    monkeypatch.setattr('sys.argv', ['summarize_extraction.py', '--job-dir', str(folder)])
+    assert summarize_extraction.main() == 0
+    output = capsys.readouterr().out
+    expected = 'unknown' if elapsed is None else str(float(elapsed))
+    assert 'Provider batch wall time seconds: ' + expected in output
+    assert 'not per-chunk inference latency' in output
