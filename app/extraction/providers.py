@@ -4,10 +4,12 @@ import math
 import http.client
 import os
 import re
+import socket
+import ssl
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 class NoRedirect(HTTPRedirectHandler):
@@ -24,11 +26,41 @@ def number_or_none(value):
 
 
 class CallFailure(Exception):
-    def __init__(self, kind, status=None, retry_after=None):
+    def __init__(self, kind, status=None, retry_after=None, detail=None):
         super().__init__(kind)  # Never echo provider bodies, headers or secrets.
         self.kind = kind
         self.status = status
         self.retry_after = retry_after
+        self.detail = detail
+
+
+def transport_cause(error):
+    # urllib wraps socket/ssl failures in URLError; unwrap to the real cause.
+    if isinstance(error, URLError):
+        return error.reason
+    return error
+
+
+def transport_kind(cause):
+    # Named categories for the failures we can recognize. Anything else stays
+    # honestly unknown instead of guessing a cause.
+    if isinstance(cause, socket.gaierror):
+        return 'transport_dns'
+    if isinstance(cause, ssl.SSLError):
+        return 'transport_tls'
+    if isinstance(cause, (socket.timeout, TimeoutError)):
+        return 'transport_timeout'
+    if isinstance(cause, ConnectionRefusedError):
+        return 'transport_refused'
+    if isinstance(cause, ConnectionResetError):
+        return 'transport_reset'
+    return 'transport_unknown'
+
+
+def transport_detail(cause):
+    # Only the exception class and errno: enough to act on, never message
+    # prose, which can contain URLs, provider text or local paths.
+    return {'exception': type(cause).__name__, 'errno': getattr(cause, 'errno', None)}
 
 
 class JSONProvider:
@@ -80,8 +112,9 @@ class JSONProvider:
                     except (ValueError, TypeError, OverflowError):
                         kind = 'http_failure_retry_after_unparseable'
             raise CallFailure(kind, error.code, retry_after) from None
-        except (OSError, EOFError, http.client.HTTPException):
-            raise CallFailure('transport_unknown') from None
+        except (OSError, EOFError, http.client.HTTPException) as error:
+            cause = transport_cause(error)
+            raise CallFailure(transport_kind(cause), detail=transport_detail(cause)) from None
         elapsed = time.monotonic() - started
         data = None
         try:
@@ -95,6 +128,23 @@ class JSONProvider:
         return {'raw_envelope': raw, 'raw_text': text, 'http_status': status,
                 'request_seconds': elapsed, 'usage': data.get('usage') or data.get('usageMetadata'),
                 'outcome': 'returned', 'cost_usd': None}
+
+    def check_dns(self, resolver=None):
+        """Read-only name resolution check before any live request is claimed.
+
+        Returns None when the provider host resolves, otherwise a plain
+        problem sentence. A failure here means the network or DNS is broken;
+        running would only burn an attempt on a guaranteed failure.
+        """
+        host = self.endpoint()[0].split('/')[2]
+        resolve = resolver or socket.getaddrinfo
+        try:
+            resolve(host, 443)
+        except OSError as error:
+            return ('cannot resolve ' + host + ' (' + type(error).__name__ + ' errno '
+                    + str(getattr(error, 'errno', None)) + '): the network or DNS lookup '
+                    'is failing. Fix connectivity first; no request was sent.')
+        return None
 
     def key_variable(self):
         return 'GEMINI_API_KEY' if self.provider == 'gemini' else 'OPENAI_API_KEY'
@@ -173,8 +223,9 @@ class JSONProvider:
                 return response.read().decode('utf-8')
         except HTTPError as error:
             raise CallFailure('batch_http_failure', error.code) from None
-        except (OSError, EOFError, http.client.HTTPException):
-            raise CallFailure('batch_transport_unknown') from None
+        except (OSError, EOFError, http.client.HTTPException) as error:
+            cause = transport_cause(error)
+            raise CallFailure('batch_transport_unknown', detail=transport_detail(cause)) from None
 
     def batch_submit(self, items, display_name):
         """Native provider batch, one inference per item, never packed together.

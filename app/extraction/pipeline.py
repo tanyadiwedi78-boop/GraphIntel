@@ -256,6 +256,7 @@ class Pipeline:
         except CallFailure as error:
             result = {'http_status': error.status, 'outcome': error.kind,
                       'retry_after': error.retry_after, 'raw_text': None,
+                      'transport_detail': error.detail,
                       'cost_usd': None, 'request_seconds': self.clock() - started}
         # Unexpected error leaves a claim without result: no retry on resume.
         result.update(claim)
@@ -355,7 +356,8 @@ class Pipeline:
     def checkpoint(self, chunk, result, recovered=False, chunk_wall_seconds=None):
         record = validated_record(result.get('raw_text'), chunk, self.ontology)
         record.update(provider=result['provider'], request_seconds=result.get('request_seconds'),
-                      terminal_outcome=result['outcome'], recovered_from_checkpoint=recovered,
+                      terminal_outcome=result['outcome'], transport_detail=result.get('transport_detail'),
+                      recovered_from_checkpoint=recovered,
                       chunk_wall_seconds=chunk_wall_seconds)
         save_new(self.job / ('chunk-' + identity(chunk['chunk_id']) + '.json'), record)
         cache_path, key = self.cache_path(chunk)
@@ -999,6 +1001,18 @@ def main(argv=None):
                 provider_limits = {primary.recipe['provider']: {'rpm': args.rpm, 'tpm': args.tpm}}
                 if args.paid_fallback_authorized:
                     provider_limits['openai'] = {'rpm': args.fallback_rpm, 'tpm': args.fallback_tpm}
+                # Fail before claiming when the provider host cannot even be
+                # resolved; a broken DNS would only burn a doomed attempt. The
+                # authorization gate inside run() keeps its first say: only an
+                # authorized run pays for this read-only lookup.
+                if args.execute_authorized and primary.recipe.get('execution_mode') != 'offline_fixture':
+                    problem = primary.check_dns()
+                    if problem:
+                        parser.error(problem)
+                    if args.paid_fallback_authorized and fallback:
+                        problem = fallback.check_dns()
+                        if problem:
+                            parser.error(problem)
                 result = pipe.run(args.max_calls, args.rpm, args.execute_authorized, args.paid_fallback_authorized,
                                   tokens_per_minute=args.tpm, provider_limits=provider_limits)
             elif args.stage == 'batch-submit':
