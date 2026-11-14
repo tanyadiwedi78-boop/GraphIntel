@@ -67,6 +67,10 @@ def test_write_subset_creates_file_and_prints_matching_commands(tmp_path):
     assert [row["chunk_id"] for row in written] == ids
     assert f"--chunks {subset}" in result.stdout
     assert "--chunks data/chunks/chunks.jsonl" not in result.stdout
+    assert "run_extraction.py phase1 prepare" in result.stdout
+    assert "--output data/sample-job-prepare.json" in result.stdout
+    assert "Do NOT run this yet" in result.stdout
+    assert "python -m app.extraction.pipeline" not in result.stdout
 
 
 def test_write_subset_refuses_to_overwrite_existing_file(tmp_path):
@@ -105,3 +109,53 @@ def test_sample_pick_is_deterministic(tmp_path):
     run_second = run_list_chunks(data_dir, ["--sample", "5", "--write-subset", str(second)])
     assert run_first.returncode == 0 and run_second.returncode == 0
     assert first.read_bytes() == second.read_bytes()
+
+
+def make_grounded_subset(tmp_path):
+    data_dir, chunks = make_chunks_folder(tmp_path)
+    for chunk in chunks:
+        chunk["source_sha256"] = "ab" * 32
+    chunks_path = data_dir / "chunks" / "chunks.jsonl"
+    with chunks_path.open("w", encoding="utf-8") as out:
+        for chunk in chunks:
+            out.write(json.dumps(chunk) + "\n")
+    subset = data_dir / "chunks" / "sample5.jsonl"
+    result = run_list_chunks(data_dir, ["--sample", "5", "--write-subset", str(subset)])
+    assert result.returncode == 0, result.stderr + result.stdout
+    return subset
+
+
+def test_printed_prepare_command_runs_end_to_end_offline(tmp_path):
+    subset = make_grounded_subset(tmp_path)
+    job = tmp_path / "sample-job"
+    plan_out = tmp_path / "sample-job-prepare.json"
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "run_extraction.py"), "phase1", "prepare",
+         "--job", str(job), "--chunks", str(subset),
+         "--gemini-model", "unverified-placeholder-model", "--max-output-tokens", "4096",
+         "--output", str(plan_out)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert (job / "plan.json").exists()
+    assert plan_out.exists()
+    plan = json.loads((job / "plan.json").read_text(encoding="utf-8"))
+    statuses = json.dumps(plan)
+    assert "Not priced; execution blocked" in statuses
+
+
+def test_module_entry_point_is_not_a_silent_noop_guard(tmp_path):
+    subset = make_grounded_subset(tmp_path)
+    job = tmp_path / "module-job"
+    result = subprocess.run(
+        [sys.executable, "-m", "app.extraction.pipeline", "prepare",
+         "--job", str(job), "--chunks", str(subset),
+         "--gemini-model", "unverified-placeholder-model", "--max-output-tokens", "4096",
+         "--output", str(tmp_path / "out.json")],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert not job.exists(), "python -m app.extraction.pipeline must not be the documented entry point"

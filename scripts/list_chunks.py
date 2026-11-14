@@ -113,10 +113,12 @@ def print_sample(chunks: list, picked: list, subset_path) -> None:
     print("")
     print(f"Wrote {len(picked)} chunks to {subset_path}")
     print("")
-    print("Prepare an OFFLINE plan (no provider calls) for a sample job:")
+    print("Do NOT run this yet: prepare an OFFLINE plan (no provider calls) only after")
+    print("your Gemini model and current AI Studio limits are verified. Replace MODEL then.")
     print("")
-    print("python -m app.extraction.pipeline prepare --job data/sample-job "
-          f"--chunks {subset_path} --gemini-model MODEL --max-output-tokens 4096")
+    print("python scripts/run_extraction.py phase1 prepare --job data/sample-job "
+          f"--chunks {subset_path} --gemini-model MODEL --max-output-tokens 4096 "
+          "--output data/sample-job-prepare.json")
     print("")
     print("Review the immutable plan before approving any execution; a run needs")
     print("--execute-authorized plus verified --rpm/--tpm limits. Never repeat a batch")
