@@ -102,22 +102,23 @@ def print_sample(chunks: list, picked: list) -> None:
               f" {chunk.get('item_id')}  table: {chunk.get('is_table')}, {chunk.get('est_tokens')} est tokens")
     joined = ",".join(ids)
     print("")
-    print("Prepare an OFFLINE Anthropic-only batch plan for exactly these chunks:")
+    print("Prepare an OFFLINE plan (no provider calls) for a sample job:")
     print("")
-    print("python scripts/run_extraction.py prepare --job-dir data/anthropic-sample --max-chunks "
-          + str(len(ids)) + " --chunk-ids " + joined)
+    print("python -m app.extraction.pipeline prepare --job data/sample-job "
+          "--chunks data/chunks/chunks.jsonl --gemini-model MODEL --max-output-tokens 4096")
     print("")
-    print("Review the immutable plan and strict reservation before approving any paid submission.")
-    print("Never repeat a batch submission after a timeout; reconcile its saved claim first.")
+    print("Review the immutable plan before approving any execution; a run needs")
+    print("--execute-authorized plus verified --rpm/--tpm limits. Never repeat a batch")
+    print("submission after a timeout; reconcile its saved claim first.")
     print("")
     print("Then read each result next to its source text:")
     print("")
-    print("python scripts/review_extraction.py --results-dir data/anthropic-sample/extractions --chunk-ids " + joined)
+    print("python scripts/review_extraction.py --results-dir data/sample-job --chunk-ids " + joined)
     print("")
     print("Create the labels file, fill it in completely, then score it:")
     print("")
     print("python scripts/review_extraction.py --chunk-ids " + joined + " --write-labels data/labels_sample.json")
-    print("python scripts/review_extraction.py --results-dir data/anthropic-sample/extractions --labels data/labels_sample.json")
+    print("python scripts/review_extraction.py --results-dir data/sample-job --labels data/labels_sample.json")
 
 
 def main() -> int:

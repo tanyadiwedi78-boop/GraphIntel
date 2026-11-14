@@ -18,8 +18,8 @@ Three uses:
 Fill the labels file by reading each chunk's text, then set reviewed=true.
 A reviewed empty answer is a real negative example, not unfinished work.
 Unreviewed or legacy entries are never assumed reviewed. "entities" lists what the
-source really supports (name and type); "relationships" lists what the source
-really states (relation, source, target). Matching ignores upper/lower case
+source really supports (canonical_name and entity_type); "relationships" lists what
+the source really states (relationship_type, source_entity, target_entity). Matching ignores upper/lower case
 and extra spaces, nothing else: if the model's name differs from yours, it
 counts as wrong and yours counts as missed. Use the canonical company name
 only when an explicit source-local alias definition supports that normalization;
@@ -37,10 +37,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import ConfigError, load_settings
-from app.extraction.runner import PROMPT_VERSION, SCHEMA_VERSION
+from app.extraction.contracts import CONTRACT_VERSION
+from app.extraction.pipeline import PROMPT_VERSION
 
-ENTITY_FIELDS = ["name", "type"]
-RELATIONSHIP_FIELDS = ["relation", "source", "target"]
+ENTITY_FIELDS = ["canonical_name", "entity_type"]
+RELATIONSHIP_FIELDS = ["relationship_type", "source_entity", "target_entity"]
 
 
 def read_chunks(chunks_path: Path) -> list:
@@ -64,21 +65,14 @@ def parse_chunk_ids(raw: str) -> list:
 
 
 def find_result(results_dir: str, chunk_id: str):
-    """The newest saved result file for this chunk, or (None, None)."""
-    pattern = os.path.join(results_dir, chunk_id + "__*.json")
-    paths = glob.glob(pattern)
-    if len(paths) == 0:
-        return None, None
-    newest_path = None
-    newest_mtime = -1.0
-    for path in paths:
-        mtime = os.path.getmtime(path)
-        if mtime > newest_mtime:
-            newest_mtime = mtime
-            newest_path = path
-    with open(newest_path, "r", encoding="utf-8") as f:
-        record = json.load(f)
-    return newest_path, record
+    """The saved checkpoint record for this chunk in a job directory, or (None, None)."""
+    paths = glob.glob(os.path.join(results_dir, "chunk-*.json"))
+    for path in sorted(paths):
+        with open(path, "r", encoding="utf-8") as f:
+            record = json.load(f)
+        if record.get("chunk_id") == chunk_id:
+            return path, record
+    return None, None
 
 
 def normalize(value) -> str:
@@ -128,18 +122,19 @@ def print_sheet(chunk, result_path, record) -> None:
     print(chunk.get("text", ""))
     print("-" * 60)
     if record is None:
-        print("EXTRACTION: no saved result for this chunk yet. Run scripts/run_extraction.py first.")
+        print("EXTRACTION: no saved result for this chunk yet. Run the pipeline prepare/run stages first.")
         return
     print("EXTRACTION from " + str(result_path))
-    print("status: " + str(record.get("status")) + "  prompt: " + str(record.get("prompt_version"))
-          + "  schema: " + str(record.get("schema_version")) + "  model: " + str(record.get("model")))
+    print("accepted: " + str(record.get("accepted")) + "  contract: " + str(record.get("contract_version"))
+          + "  provider: " + str(record.get("provider")) + "  outcome: " + str(record.get("terminal_outcome")))
     print("entities:")
     for entity in record.get("entities", []):
-        print("  - " + str(entity.get("name")) + " (" + str(entity.get("type")) + ")")
+        print("  - " + str(entity.get("canonical_name")) + " (" + str(entity.get("entity_type")) + ")")
     print("relationships:")
     for rel in record.get("relationships", []):
-        print("  - " + str(rel.get("source")) + " -" + str(rel.get("relation")) + "-> " + str(rel.get("target")))
-        print("    evidence: \"" + str(rel.get("evidence_quote")) + "\"")
+        print("  - " + str(rel.get("source_entity")) + " -" + str(rel.get("relationship_type"))
+              + "-> " + str(rel.get("target_entity")))
+        print("    evidence: \"" + str(rel.get("evidence")) + "\"")
         print("    confidence: " + str(rel.get("confidence")))
 
 
@@ -255,9 +250,9 @@ def run_score(settings, labels_path: Path, results_dir=None) -> int:
         reason = None
         if record is None:
             reason = "missing"
-        elif record.get("prompt_version") != PROMPT_VERSION or record.get("schema_version") != SCHEMA_VERSION:
+        elif record.get("contract_version") != CONTRACT_VERSION:
             reason = "incompatible"
-        elif record.get("status") != "valid":
+        elif record.get("accepted") is not True:
             reason = "invalid_or_failed"
         if reason is not None:
             coverage[reason] += 1
@@ -275,15 +270,15 @@ def run_score(settings, labels_path: Path, results_dir=None) -> int:
         print(f"  entities: precision {ratio_text(e_correct, len(predicted_entities))}, "
               f"recall {ratio_text(e_correct, len(expected_entities))}")
         for pred in e_wrong:
-            print(f"    wrong extraction: {pred.get('name')} ({pred.get('type')})")
+            print(f"    wrong extraction: {pred.get('canonical_name')} ({pred.get('entity_type')})")
         for exp in e_missed:
-            print(f"    missed: {exp.get('name')} ({exp.get('type')})")
+            print(f"    missed: {exp.get('canonical_name')} ({exp.get('entity_type')})")
         print(f"  relationships: precision {ratio_text(r_correct, len(predicted_rels))}, "
               f"recall {ratio_text(r_correct, len(expected_rels))}")
         for pred in r_wrong:
-            print(f"    wrong extraction: {pred.get('source')} -{pred.get('relation')}-> {pred.get('target')}")
+            print(f"    wrong extraction: {pred.get('source_entity')} -{pred.get('relationship_type')}-> {pred.get('target_entity')}")
         for exp in r_missed:
-            print(f"    missed: {exp.get('source')} -{exp.get('relation')}-> {exp.get('target')}")
+            print(f"    missed: {exp.get('source_entity')} -{exp.get('relationship_type')}-> {exp.get('target_entity')}")
         totals["e_pred"] = totals["e_pred"] + len(predicted_entities)
         totals["e_correct"] = totals["e_correct"] + e_correct
         totals["r_pred"] = totals["r_pred"] + len(predicted_rels)
@@ -315,7 +310,7 @@ def main() -> int:
                         help="create or extend a labels JSON file for --chunk-ids")
     parser.add_argument("--labels", default=None, metavar="PATH",
                         help="score saved results against this labels JSON file")
-    parser.add_argument("--results-dir", default=None, help="job extractions directory; default data/extraction")
+    parser.add_argument("--results-dir", default=None, help="pipeline job directory; default data/extraction")
     args = parser.parse_args()
 
     try:

@@ -1,4 +1,7 @@
 """Offline synthetic scale check. No key, API, GPU or corpus data is used.
+UNSUPPORTED: imports the retired app.extraction.anthropic_batch module.
+Kept as historical reference only; it cannot run on the current pipeline.
+Do not delete without the project owner's approval.
 
 Run from the repository root. This measures THIS process on Linux/macOS, not
 Windows laptop capacity. --memory-limit-mib adds a Linux address-space limit.

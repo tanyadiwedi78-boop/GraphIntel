@@ -925,119 +925,124 @@ def main(argv=None):
         from dotenv import load_dotenv
         load_dotenv(Path(__file__).resolve().parents[2] / '.env', override=False)
     ontology = load_ontology(args.ontology)
-    if args.stage == 'demo':
-        result = offline_demo(ontology)
-    elif args.stage in ('calibrate', 'identity-eval'):
-        if not args.identity_pairs or not args.embedding_model_path:
-            parser.error('calibrate requires source-bound reviewed identity pairs and a local embedding model')
-        from app.graph.resolution import LocalEmbedder, calibrate, evaluate_resolution
-        embedder = LocalEmbedder(args.embedding_model_path)
-        if args.stage == 'calibrate':
-            result = calibrate(load(args.identity_pairs), embedder)
-        else:
-            if not args.calibration:
-                parser.error('identity-eval requires calibration and separate held-out reviewed pairs')
-            result = evaluate_resolution(load(args.identity_pairs), embedder, load(args.calibration))
-    elif args.stage == 'registry':
-        if not args.neo4j_uri or not args.database:
-            parser.error('registry requires explicit Neo4j URI and database')
-        from neo4j import GraphDatabase
-        from app.graph.neo4j_store import read_registry
-        import os
-        with GraphDatabase.driver(args.neo4j_uri, auth=(os.environ['NEO4J_USERNAME'], os.environ['NEO4J_PASSWORD'])) as driver:
-            result = read_registry(driver, args.database, identity([args.neo4j_uri, args.database]))
-    elif args.stage in ('prepare', 'compare-prepare'):
-        if not args.chunks or not args.gemini_model or not args.max_output_tokens:
-            parser.error('prepare requires chunks, explicit Gemini model and output-token limit')
-        if args.chunks.stat().st_size > 16 * 1024 * 1024:
-            parser.error('select a chunks JSONL file up to 16 MiB; no implicit truncation')
-        chunks = []
-        with args.chunks.open(encoding='utf-8') as handle:
-            for line in handle:
-                if line.strip():
-                    chunks.append(json.loads(line))
-        primary = JSONProvider('gemini', args.gemini_model, args.max_output_tokens)
-        fallback = JSONProvider('openai', args.openai_model, args.max_output_tokens) if args.openai_model else None
-        policy = retry_policy(args.retries)
-        pricing = load(args.pricing) if args.pricing else None
-        limits = load(args.cost_limits) if args.cost_limits else None
-        if args.stage == 'compare-prepare':
-            if not fallback or not args.labels:
-                parser.error('compare-prepare requires explicit OpenAI model and source-bound reviewed labels')
-            result = prepare_comparison(args.job, chunks, ontology, primary.recipe, fallback.recipe,
-                load(args.labels), policy, limits, pricing, args.execution_mode)
-        else:
-            result = prepare(args.job, chunks, ontology, primary.recipe, fallback.recipe if fallback else None,
-                policy, limits, pricing, execution_mode=args.execution_mode)
-    elif args.stage == 'compare':
-        manifest = load(args.job / 'comparison.json')
-        providers = [JSONProvider(r['provider'], r['model'], r['max_output_tokens']) for r in manifest['providers']]
-        result = compare_reports(args.job, ontology, providers,
-            load(args.evidence_reviews) if args.evidence_reviews else None,
-            load(args.cost_ledger) if args.cost_ledger else None)
-    else:
-        plan = load(args.job / 'plan.json')
-        def provider(recipe):
-            transport = JSONProvider(recipe['provider'], recipe['model'], recipe['max_output_tokens'])
-            transport.recipe = recipe  # Preserve historical identity for read-only reports.
-            return transport
-        primary = provider(plan['primary'])
-        fallback = provider(plan['fallback']) if plan['fallback'] else None
-        pipe = Pipeline(args.job, ontology, primary, fallback, cache_dir=args.cache)
-        if args.stage == 'run':
-            if args.rpm is None or args.tpm is None:
-                parser.error('run requires verified local RPM and TPM; other account users and RPD remain external limits')
-            # Fail before claiming when credentials are absent.
-            import os
-            if not os.environ.get(primary.key_variable(), '').strip():
-                parser.error(primary.key_variable() + ' missing')
-            if args.paid_fallback_authorized and (not fallback or not os.environ.get('OPENAI_API_KEY', '').strip()):
-                parser.error('configured fallback and OPENAI_API_KEY required')
-            provider_limits = {primary.recipe['provider']: {'rpm': args.rpm, 'tpm': args.tpm}}
-            if args.paid_fallback_authorized:
-                provider_limits['openai'] = {'rpm': args.fallback_rpm, 'tpm': args.fallback_tpm}
-            result = pipe.run(args.max_calls, args.rpm, args.execute_authorized, args.paid_fallback_authorized,
-                              tokens_per_minute=args.tpm, provider_limits=provider_limits)
-        elif args.stage == 'batch-submit':
-            result = pipe.batch_submit(args.max_calls, args.execute_authorized, args.paid_fallback_authorized,
-                                       args.batch_max_requests, args.batch_max_input_units)
-        elif args.stage == 'batch-collect':
-            if args.wave is None:
-                parser.error('batch-collect requires wave number')
-            result = pipe.batch_collect(args.wave)
-        elif args.stage == 'report':
-            result = pipe.report(load(args.labels) if args.labels else None,
-                                 load(args.evidence_reviews) if args.evidence_reviews else None,
-                                 load(args.cost_ledger) if args.cost_ledger else None)
-        else:
-            records = pipe.records()
-            merges = load(args.reviewed_merges) if args.reviewed_merges else []
-            if args.stage == 'resolve':
-                if args.registry or args.calibration or args.embedding_model_path:
-                    if not (args.registry and args.calibration and args.embedding_model_path):
-                        parser.error('global resolve requires registry snapshot, calibration and local embedding model')
-                    from app.graph.resolution import LocalEmbedder, global_resolve
-                    result = global_resolve(records, load(args.registry), LocalEmbedder(args.embedding_model_path), load(args.calibration),
-                                            load(args.identity_reviews) if args.identity_reviews else None)
-                else:
-                    result = resolve(records, merges)
-                    result['status'] = 'Source-local preview only; global embedding resolution not run'
+    try:
+        if args.stage == 'demo':
+            result = offline_demo(ontology)
+        elif args.stage in ('calibrate', 'identity-eval'):
+            if not args.identity_pairs or not args.embedding_model_path:
+                parser.error('calibrate requires source-bound reviewed identity pairs and a local embedding model')
+            from app.graph.resolution import LocalEmbedder, calibrate, evaluate_resolution
+            embedder = LocalEmbedder(args.embedding_model_path)
+            if args.stage == 'calibrate':
+                result = calibrate(load(args.identity_pairs), embedder)
             else:
-                if not args.evidence_reviews:
-                    parser.error('graph plan requires explicit source-bound entity and edge evidence reviews')
-                global_resolution = load(args.global_resolution) if args.global_resolution else None
-                if args.stage == 'graph':
-                    result = graph_plan(records, merges, load(args.evidence_reviews), global_resolution)
+                if not args.calibration:
+                    parser.error('identity-eval requires calibration and separate held-out reviewed pairs')
+                result = evaluate_resolution(load(args.identity_pairs), embedder, load(args.calibration))
+        elif args.stage == 'registry':
+            if not args.neo4j_uri or not args.database:
+                parser.error('registry requires explicit Neo4j URI and database')
+            from neo4j import GraphDatabase
+            from app.graph.neo4j_store import read_registry
+            import os
+            with GraphDatabase.driver(args.neo4j_uri, auth=(os.environ['NEO4J_USERNAME'], os.environ['NEO4J_PASSWORD'])) as driver:
+                result = read_registry(driver, args.database, identity([args.neo4j_uri, args.database]))
+        elif args.stage in ('prepare', 'compare-prepare'):
+            if not args.chunks or not args.gemini_model or not args.max_output_tokens:
+                parser.error('prepare requires chunks, explicit Gemini model and output-token limit')
+            if not args.chunks.is_file():
+                parser.error('chunks file not found: ' + str(args.chunks) + '; run scripts/build_chunks.py first')
+            if args.chunks.stat().st_size > 16 * 1024 * 1024:
+                parser.error('select a chunks JSONL file up to 16 MiB; no implicit truncation')
+            chunks = []
+            with args.chunks.open(encoding='utf-8') as handle:
+                for line in handle:
+                    if line.strip():
+                        chunks.append(json.loads(line))
+            primary = JSONProvider('gemini', args.gemini_model, args.max_output_tokens)
+            fallback = JSONProvider('openai', args.openai_model, args.max_output_tokens) if args.openai_model else None
+            policy = retry_policy(args.retries)
+            pricing = load(args.pricing) if args.pricing else None
+            limits = load(args.cost_limits) if args.cost_limits else None
+            if args.stage == 'compare-prepare':
+                if not fallback or not args.labels:
+                    parser.error('compare-prepare requires explicit OpenAI model and source-bound reviewed labels')
+                result = prepare_comparison(args.job, chunks, ontology, primary.recipe, fallback.recipe,
+                    load(args.labels), policy, limits, pricing, args.execution_mode)
+            else:
+                result = prepare(args.job, chunks, ontology, primary.recipe, fallback.recipe if fallback else None,
+                    policy, limits, pricing, execution_mode=args.execution_mode)
+        elif args.stage == 'compare':
+            manifest = load(args.job / 'comparison.json')
+            providers = [JSONProvider(r['provider'], r['model'], r['max_output_tokens']) for r in manifest['providers']]
+            result = compare_reports(args.job, ontology, providers,
+                load(args.evidence_reviews) if args.evidence_reviews else None,
+                load(args.cost_ledger) if args.cost_ledger else None)
+        else:
+            plan = load(args.job / 'plan.json')
+            def provider(recipe):
+                transport = JSONProvider(recipe['provider'], recipe['model'], recipe['max_output_tokens'])
+                transport.recipe = recipe  # Preserve historical identity for read-only reports.
+                return transport
+            primary = provider(plan['primary'])
+            fallback = provider(plan['fallback']) if plan['fallback'] else None
+            pipe = Pipeline(args.job, ontology, primary, fallback, cache_dir=args.cache)
+            if args.stage == 'run':
+                if args.rpm is None or args.tpm is None:
+                    parser.error('run requires verified local RPM and TPM; other account users and RPD remain external limits')
+                # Fail before claiming when credentials are absent.
+                import os
+                if not os.environ.get(primary.key_variable(), '').strip():
+                    parser.error(primary.key_variable() + ' missing')
+                if args.paid_fallback_authorized and (not fallback or not os.environ.get('OPENAI_API_KEY', '').strip()):
+                    parser.error('configured fallback and OPENAI_API_KEY required')
+                provider_limits = {primary.recipe['provider']: {'rpm': args.rpm, 'tpm': args.tpm}}
+                if args.paid_fallback_authorized:
+                    provider_limits['openai'] = {'rpm': args.fallback_rpm, 'tpm': args.fallback_tpm}
+                result = pipe.run(args.max_calls, args.rpm, args.execute_authorized, args.paid_fallback_authorized,
+                                  tokens_per_minute=args.tpm, provider_limits=provider_limits)
+            elif args.stage == 'batch-submit':
+                result = pipe.batch_submit(args.max_calls, args.execute_authorized, args.paid_fallback_authorized,
+                                           args.batch_max_requests, args.batch_max_input_units)
+            elif args.stage == 'batch-collect':
+                if args.wave is None:
+                    parser.error('batch-collect requires wave number')
+                result = pipe.batch_collect(args.wave)
+            elif args.stage == 'report':
+                result = pipe.report(load(args.labels) if args.labels else None,
+                                     load(args.evidence_reviews) if args.evidence_reviews else None,
+                                     load(args.cost_ledger) if args.cost_ledger else None)
+            else:
+                records = pipe.records()
+                merges = load(args.reviewed_merges) if args.reviewed_merges else []
+                if args.stage == 'resolve':
+                    if args.registry or args.calibration or args.embedding_model_path:
+                        if not (args.registry and args.calibration and args.embedding_model_path):
+                            parser.error('global resolve requires registry snapshot, calibration and local embedding model')
+                        from app.graph.resolution import LocalEmbedder, global_resolve
+                        result = global_resolve(records, load(args.registry), LocalEmbedder(args.embedding_model_path), load(args.calibration),
+                                                load(args.identity_reviews) if args.identity_reviews else None)
+                    else:
+                        result = resolve(records, merges)
+                        result['status'] = 'Source-local preview only; global embedding resolution not run'
                 else:
-                    if not (global_resolution and args.neo4j_uri and args.database and args.write_authorized):
-                        parser.error('write requires global resolution, explicit target and write authority')
-                    from neo4j import GraphDatabase
-                    from app.graph.neo4j_store import write_graph
-                    import os
-                    with GraphDatabase.driver(args.neo4j_uri, auth=(os.environ['NEO4J_USERNAME'], os.environ['NEO4J_PASSWORD'])) as driver:
-                        result = write_graph(driver, args.database, identity([args.neo4j_uri, args.database]),
-                            records, global_resolution, load(args.evidence_reviews),
-                            authorized=args.write_authorized, schema_authorized=args.schema_authorized)
+                    if not args.evidence_reviews:
+                        parser.error('graph plan requires explicit source-bound entity and edge evidence reviews')
+                    global_resolution = load(args.global_resolution) if args.global_resolution else None
+                    if args.stage == 'graph':
+                        result = graph_plan(records, merges, load(args.evidence_reviews), global_resolution)
+                    else:
+                        if not (global_resolution and args.neo4j_uri and args.database and args.write_authorized):
+                            parser.error('write requires global resolution, explicit target and write authority')
+                        from neo4j import GraphDatabase
+                        from app.graph.neo4j_store import write_graph
+                        import os
+                        with GraphDatabase.driver(args.neo4j_uri, auth=(os.environ['NEO4J_USERNAME'], os.environ['NEO4J_PASSWORD'])) as driver:
+                            result = write_graph(driver, args.database, identity([args.neo4j_uri, args.database]),
+                                records, global_resolution, load(args.evidence_reviews),
+                                authorized=args.write_authorized, schema_authorized=args.schema_authorized)
+    except ValueError as error:
+        parser.error(str(error))
     save_new(args.output, result)
     print('Saved ' + str(args.output) + ('. Graph write was explicitly requested.' if args.stage == 'write' else '. No graph writes performed.'))
     return 0

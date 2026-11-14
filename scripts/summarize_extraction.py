@@ -1,48 +1,66 @@
-"""Read a completed Anthropic batch summary. No API requests or spending."""
+"""Read a pipeline job's durable state. No API requests or spending.
+
+Prints what the job directory actually records: plan identity, submitted
+waves, per-chunk checkpoint outcomes, and honest unknowns (cost is never
+invented; native batch has no per-request latency).
+"""
 import argparse
+import glob
 import json
 from pathlib import Path
 
 
+def read_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Read measured Anthropic batch usage and cost, not an invoice or corpus forecast.")
+    parser = argparse.ArgumentParser(
+        description="Read a pipeline job's recorded state, not an invoice or corpus forecast.")
     parser.add_argument("--job-dir", required=True)
     args = parser.parse_args()
-    path = Path(args.job_dir) / "summary.json"
-    if not path.exists():
-        print("No completed summary. Use collect on the existing job; do not resubmit it.")
+    job = Path(args.job_dir)
+    plan_path = job / "plan.json"
+    if not plan_path.exists():
+        print(f"No plan at {plan_path}. Prepare the job first; do not resubmit anything.")
         return 1
-    summary = json.loads(path.read_text(encoding="utf-8"))
-    print("Model:", summary["model"])
-    print("Batch:", summary["batch_id"])
-    print("Outcomes:", json.dumps(summary["counts"], sort_keys=True))
-    timing = summary.get("batch_timing") or {}
-    print("Provider batch created_at:", timing.get("created_at") or "unknown")
-    print("Provider batch ended_at:", timing.get("ended_at") or "unknown")
-    elapsed = timing.get("elapsed_seconds")
-    print("Provider batch wall time seconds:", "unknown" if elapsed is None else elapsed)
-    print("Timing scope: includes provider queue/processing; not per-chunk inference latency.")
-    print("Known reported input-token subtotal:", summary["reported_total_input_tokens"])
-    print("Known reported output tokens (includes thinking):", summary["reported_output_tokens"])
-    print("Cache reads / writes:", summary["cache_read_input_tokens"], "/", summary["cache_creation_input_tokens"])
-    print("Usage completeness:", summary.get("usage_complete", "unknown for older summary"))
-    print("Missing usage fields by request:", json.dumps(summary.get("usage_missing_fields", {}), sort_keys=True))
-    cost = summary["calculated_cost_usd"]
-    print("Calculated token cost USD:", "unknown" if cost is None else cost)
-    print("Known subtotal USD:", summary["known_calculated_cost_usd"])
-    print("Requests with unknown cost:", summary["unknown_cost_count"])
-    print("Calculated chain token cost USD:", "unknown" if summary.get("chain_calculated_cost_usd") is None else summary["chain_calculated_cost_usd"])
-    print("Cost basis:", summary["cost_basis"])
-    print("Price source:", summary["price_source"])
-    print("Per-document measurements for this batch:")
-    for document, totals in summary["documents"].items():
-        print(document + ": " + json.dumps(totals, sort_keys=True))
-    print("Per-document repair-chain totals (includes earlier documents, not just this batch):")
-    print("Chain document history complete:", summary.get("chain_documents_complete", False))
-    for document, totals in summary.get("chain_documents", {}).items():
-        print(document + ": " + json.dumps(totals, sort_keys=True))
-    print("Validator success is not factual accuracy. Review each source and label a varied sample.")
-    print("Token-derived costs exclude unknown account adjustments/taxes; reconcile account billing separately.")
+    plan = read_json(plan_path)
+    print("Plan:", plan.get("plan_hash", "unknown")[:16], " contract:", plan.get("version"),
+          " prompt:", plan.get("prompt_version"), " mode:", plan.get("execution_mode"))
+    print("Planned chunks:", len(plan.get("chunks", [])))
+
+    waves = sorted(glob.glob(str(job / "batch-*-claim.json")))
+    for claim_path in waves:
+        stem = claim_path[:-len("-claim.json")]
+        claim = read_json(claim_path)
+        state = "claimed, no receipt (reconcile before any resubmission)"
+        if Path(stem + "-receipt.json").exists():
+            state = "submitted, not collected"
+        if Path(stem + "-collected.json").exists():
+            collected = read_json(stem + "-collected.json")
+            state = "collected at " + str(collected.get("finished_at"))
+        print("Wave", Path(stem).name + ":", claim.get("provider"), len(claim.get("items", [])),
+              "items -", state)
+    print("Native batch waves have no per-request latency; wall time is not inference latency.")
+
+    records = []
+    for path in sorted(glob.glob(str(job / "chunk-*.json"))):
+        records.append(read_json(path))
+    accepted = len([r for r in records if r.get("accepted") is True])
+    print("Chunk checkpoints:", len(records), " accepted:", accepted,
+          " not accepted:", len(records) - accepted)
+    outcomes = {}
+    for record in records:
+        outcome = str(record.get("terminal_outcome", "unknown"))
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+    if outcomes:
+        print("Outcomes:", json.dumps(outcomes, sort_keys=True))
+    cached = len([r for r in records if r.get("cache_hit") is True])
+    if cached:
+        print("Cache hits (no provider call):", cached)
+    print("Cost: unknown. This tool never computes dollars; reconcile account billing separately.")
+    print("Validation acceptance is not factual accuracy. Review sources and label a varied sample.")
     return 0
 
 
