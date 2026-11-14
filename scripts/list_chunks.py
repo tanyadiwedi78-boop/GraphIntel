@@ -90,7 +90,7 @@ def pick_sample(chunks: list, size: int) -> list:
     return picked
 
 
-def print_sample(chunks: list, picked: list) -> None:
+def print_sample(chunks: list, picked: list, subset_path) -> None:
     ids = []
     print(f"Sample of {len(picked)} chunks:")
     number = 0
@@ -100,12 +100,23 @@ def print_sample(chunks: list, picked: list) -> None:
         ids.append(str(chunk.get("chunk_id")))
         print(f"  {number}. {chunk.get('chunk_id')}  {chunk.get('ticker')} {chunk.get('form')}"
               f" {chunk.get('item_id')}  table: {chunk.get('is_table')}, {chunk.get('est_tokens')} est tokens")
+    if subset_path is None:
+        print("")
+        print("To prepare an offline plan for these chunks, write them to a subset file first:")
+        print("")
+        print(f"python scripts/list_chunks.py --sample {len(picked)} "
+              "--write-subset data/chunks/sample" + str(len(picked)) + ".jsonl")
+        print("")
+        print("The full chunks.jsonl is too large for one job; the plan step needs the subset file.")
+        return
     joined = ",".join(ids)
+    print("")
+    print(f"Wrote {len(picked)} chunks to {subset_path}")
     print("")
     print("Prepare an OFFLINE plan (no provider calls) for a sample job:")
     print("")
     print("python -m app.extraction.pipeline prepare --job data/sample-job "
-          "--chunks data/chunks/chunks.jsonl --gemini-model MODEL --max-output-tokens 4096")
+          f"--chunks {subset_path} --gemini-model MODEL --max-output-tokens 4096")
     print("")
     print("Review the immutable plan before approving any execution; a run needs")
     print("--execute-authorized plus verified --rpm/--tpm limits. Never repeat a batch")
@@ -129,7 +140,13 @@ def main() -> int:
                         help="print one chunk's metadata and full text")
     parser.add_argument("--sample", type=int, default=0, metavar="N",
                         help="pick N varied chunks and print the exact next commands")
+    parser.add_argument("--write-subset", default=None, metavar="PATH",
+                        help="with --sample: write the picked chunks to PATH (must be a new file)")
     args = parser.parse_args()
+
+    if args.write_subset is not None and args.sample <= 0:
+        print("--write-subset only works together with --sample N.")
+        return 1
 
     try:
         settings = load_settings()
@@ -155,7 +172,20 @@ def main() -> int:
         if len(picked) < args.sample:
             print(f"Could only pick {len(picked)} varied chunks out of {args.sample} requested.")
             print("The sample is smaller than asked for; the commands below use the smaller sample.")
-        print_sample(chunks, picked)
+        subset_path = None
+        if args.write_subset is not None:
+            subset_path = Path(args.write_subset)
+            if subset_path.exists():
+                print(f"Not writing {subset_path}: the file already exists. Choose a new name.")
+                return 1
+            parent = subset_path.parent
+            if not parent.exists():
+                print(f"Not writing {subset_path}: folder {parent} does not exist.")
+                return 1
+            with subset_path.open("w", encoding="utf-8") as out:
+                for position in picked:
+                    out.write(json.dumps(chunks[position], ensure_ascii=False) + "\n")
+        print_sample(chunks, picked, subset_path)
         return 0
 
     if args.show is not None:
