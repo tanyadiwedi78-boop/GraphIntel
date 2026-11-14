@@ -215,3 +215,161 @@ No Phase 2 vectors/pgvector, Phase 3 query router, Phase 4 answer generation or
 Phase 5 multi-hop benchmark was added. Offline extraction/identity fixtures are
 regression checks, not real extraction-quality, latency or cost results. The
 old failed Anthropic claim and all original saved data stay intact.
+
+
+## 2026-11-13 - final two-provider Phase1 revision, prepared not on main
+
+Reconcile architecture retry/per-document cost/document-hash gaps. Same-template
+known-output retries and bounded transient backoff; optional OpenAI after Gemini
+retry exhaustion only. Durable model-ceiling USD reservations and explicit
+source_sha256 mapping. No unknown-POST resend. Fair paired jobs forbid cache and
+fallback, preserve raw-first/final metrics and relation recall. Native async batch
+waves retain IDs/claims/missing outputs; no made-up per-chunk batch latency.
+Gemini generateContent responseFormat matches current official REST examples.
+Existing legacy jobs remain preserved/read-only, separate from the new route.
+No provider calls, account changes, database execution or push in this revision.
+
+
+### Careful integration of the later extraction guide
+
+The existing 7 entity / 9 relationship SEC ontology is frozen in one config.
+The common contract now derives local Pydantic Literal types AND provider JSON
+schema from that snapshot. No replacement Person/Organization ontology, SQLite,
+Redis, LiteLLM or extra provider was added. evidence is the existing exact-quote
+field; relationships already carry source/target/type/source_chunk_id/evidence.
+Literal/schema checks limit type names, not hallucinated values or factual truth.
+Contract v3 changes require a NEW plan; old jobs remain readable, not runnable.
+
+Default is still 2 retries. Use --retries 1 at NEW preparation if selecting the
+pasted guide's one-retry policy; both independent comparison jobs use the same
+bound. Known invalid output already triggers retries then separately authorized
+fallback. Empty output can be correct even at >150 words. quality_review reports
+long_empty_output and minimum_self_reported_confidence without declaring error,
+changing acceptance, forcing new facts or spending on another request. There is
+no calibrated confidence cutoff yet and no hidden LLM judge call. Semantic quote
+support still requires source review, not a claimed 90% detection guarantee.
+
+Reports now include entity_f1, relationship_f1, exact_quote_containment_rate
+(raw case-sensitive substring), the existing whitespace-normalized containment,
+and source-reviewed evidence_accuracy. F1 uses counts directly, so a completely
+missing output scores zero recall/F1 against nonempty reviewed truth even when
+precision has no denominator. No labels still means Not measured, not zero.
+
+Optional source-reviewed name equivalences are frozen in each label object:
+  "name_groups": [["Acme", "Acme Corp"]]
+This applies only on a label marked reviewed:true with the exact source_hash.
+Groups cannot overlap, contain duplicates or empty names. They apply only to
+entity/endpoint names, never types, relation direction or quotes. No automatic
+suffix stripping/fuzzy equivalence/LLM opinion is counted as ground truth.
+A judge can suggest adjudication later, under separate approved call budgets,
+but cannot silently rewrite these labels or certify its own answer. No judge
+has run or been measured. Freeze/adjudicate labels before both provider runs.
+
+Calibrate on reviewed matches AND nonmatches with the installed local embedder.
+No separating score means blocked; do not fall back to 0.92. Both raw names and
+aliases remain intact. Then test disjoint reviewed identity pairs with the same
+model/calibration through the ACTUAL canonical-ID resolver, not just cosine:
+
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 identity-eval `
+  --job "$newJob" --identity-pairs "$heldoutPairs" `
+  --embedding-model-path "$localModel" --calibration "$calibration" `
+  --output "$identityEvalOutput"
+
+Use NEW output paths. The four variables are existing selected input/output
+paths, not files supplied by this command. Identity-eval makes local CPU calls,
+not provider calls or DB requests. Requires calibration pair_hashes, refuses
+repeated/reversed calibration/heldout pairs, requires both classes, and reports
+canonicalization_accuracy, pair precision/recall/F1 and unresolved coverage.
+Pair-hash separation is not proof of unseen entities/documents or corpus-level
+cluster accuracy. Keep calibration and held-out entity/document groups separate
+when building a real quality benchmark, not just different pair combinations.
+
+The 20 original chunks are a review candidate pool, mostly one issuer and many
+financial tables, NOT a balanced certified golden set. The review packet binds
+all20 source hashes/text and marks only the2existing assistant-reviewed labels
+reviewed:true. The other18 are UNREVIEWED, with null expected lists rather than
+invented gold. Before quality claims, complete ideal labels for 15-20 genuinely
+representative chunks, including pronouns, defined aliases, nested entities,
+negation, potential-vs-current risk, tables and reviewed-empty controls. Add
+negative identity pairs for similarly named distinct companies. Reviewer identity
+and label scope stay explicit. Do not just mark empty arrays reviewed to finish.
+No 10-second/$0.05/runtime/accuracy guarantee is asserted. Exact current model
+choices, availability, rates and relative quality must be checked and measured.
+
+
+### Fresh extraction after your local deletion: no restoration required
+
+This route does NOT import the deleted extraction runner.py, client.py,
+validate.py, anthropic_batch.py or batch_storage.py. Its extraction runtime is
+contracts.py + providers.py + pipeline.py. The entry point routes phase1 first,
+without importing any old module. Optional historical commands are not needed
+and are not instructions to restore old files. The expanded benchmark also
+avoids the historical validator; only explicit old-format reports can use it.
+Do not overwrite a surviving ontology/graph file simply because it appears here.
+Full non-extraction dependencies are included for inspection/completeness; match
+her actual local Git status before placement, keeping chunks/.env/stashes intact.
+
+Folder tree of this complete route (all ten complete files appear below):
+app/
+  extraction/
+    contracts.py
+    providers.py
+    pipeline.py
+  evaluation/
+    extraction_benchmark.py
+  graph/
+    ontology.py
+    construction.py
+    resolution.py
+    neo4j_store.py
+configs/
+  ontology.json
+scripts/
+  run_extraction.py
+
+Existing package __init__.py files can remain; these directories also work as
+Python namespace packages in the deletion-simulation test. No old extraction
+files are needed for Phase1 help, demo, prepare or the expanded report route.
+Core extraction needs Python3.10+ and Pydantic2; live .env loading needs the
+existing python-dotenv dependency. Local identity and Neo4j stages separately
+need their already-listed sentence-transformers/neo4j packages. No automatic
+installation, download, model call or DB connection happens when importing.
+
+AFTER matching/placing the complete prepared route, the first output command is:
+
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 demo `
+  --output phase1-demo-review-1.json
+Get-Content .\phase1-demo-review-1.json
+
+This creates ONE new file in the current original project folder. If that file
+exists, pick a new numbered output; do not delete/overwrite it. It runs no API,
+uses no key, spends nothing and touches no database. The source is the synthetic
+sentence "Acme develops Widget." The returned JSON clearly calls the response a
+HAND-WRITTEN fixture, not extraction by an LLM. It shows entities, directed
+relation, copied evidence, successful Pydantic/source checks and rejection of
+an invented quote. Model-proposed confidence is a fixture number, not measured
+accuracy. This verifies local wiring only. Real extraction then uses the saved
+SEC source plan, explicitly verified model/account and authorized budget.
+
+These commands are NOT claimed to run on the laptop right now. Tanya deleted
+old files; her exact remaining local paths/version are still unverified. The
+local Git check is placement safety only and does not block building this route.
+The new route was separately tested in a tree containing ONLY these ten files,
+with every historical extraction module absent: help, demo and prepare passed.
+All stage commands in this guide use the phase1 prefix. Live stages load .env
+from the original project root, without overriding existing environment values.
+Never paste .env contents or keys into chat or this File.
+
+
+### Entry-point correction after the partial local edit
+
+Replace the WHOLE scripts/run_extraction.py from the clearly labelled copy button
+near First visible output, not only the Anthropic import line. No historical
+provider import remains anywhere in this small entry point. With no arguments it
+prints safe guidance before importing the pipeline. To actually test local wiring:
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 --help
+No model or DB calls happen. Help can still expose mixed/missing local dependencies;
+that is an installation issue to inspect, not permission to restore old providers.
+Do not commit/Continue/stage the merge until local files and intended deletions are
+reviewed. The verified backup stays untouched. Tests of historical modules now call
+those modules explicitly, not the new two-provider-only entry point; none were skipped.

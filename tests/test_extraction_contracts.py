@@ -4,8 +4,17 @@ import copy
 import pytest
 from pydantic import ValidationError
 
+from pathlib import Path
+
 from app.extraction.contracts import ExtractionPayload, check_source_contract
-from tests.test_anthropic_batch import ontology
+from app.graph.ontology import load_ontology
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def ontology():
+    return load_ontology(ROOT / "configs" / "ontology.json")
 
 
 @pytest.fixture

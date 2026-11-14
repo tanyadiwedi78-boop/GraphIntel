@@ -1,17 +1,19 @@
 """Expanded extraction contract for review, separate from resolution and writes.
 
-This version is NOT wired into the existing saved Anthropic job. A model's
+No model calls or database writes happen here. A model's
 canonical_name is only its source-local name proposal, not a resolved graph ID.
 Validation proves shape/ontology/provenance/quote presence, not semantic truth.
 """
-from typing import Annotated
+from functools import lru_cache
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, create_model
 
-from app.extraction.validate import squash_spaces
+def squash_spaces(text):
+    return ' '.join(text.split())
 
 
-CONTRACT_VERSION = 'extraction-contract-v2-review'
+CONTRACT_VERSION = 'extraction-contract-v3-frozen-types'
 NonemptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Confidence = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
 
@@ -81,3 +83,24 @@ def check_source_contract(payload, chunk, ontology):
             'problems': problems, 'semantic_evidence_status': 'Not reviewed',
             'global_entity_resolution_status': 'Not performed',
             'graph_write_permitted': False}
+
+
+@lru_cache(maxsize=32)
+def frozen_contract(entity_types, relationship_types):
+    """One Literal-bound model from the existing immutable ontology, no second list.
+
+    Native JSON schema and local validation share these same fixed type names.
+    Endpoint direction and source support still need the separate checks above.
+    """
+    if not entity_types or not relationship_types:
+        raise ValueError('nonempty frozen ontology required')
+    entity = create_model('EntityExtraction', __base__=EntityExtraction,
+                          entity_type=(Literal[entity_types], ...))
+    relation = create_model('RelationshipExtraction', __base__=RelationshipExtraction,
+                            relationship_type=(Literal[relationship_types], ...))
+    return create_model('ExtractionPayload', __base__=ExtractionPayload,
+                        entities=(list[entity], ...), relationships=(list[relation], ...))
+
+
+def ontology_contract(ontology):
+    return frozen_contract(tuple(ontology.entity_types), tuple(sorted(ontology.relations)))

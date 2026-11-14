@@ -9,7 +9,7 @@ import math
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 
-from app.extraction.validate import ExtractionResponse, squash_spaces
+from app.extraction.contracts import squash_spaces
 
 
 def identity(value):
@@ -23,13 +23,37 @@ def measured_ratio(numerator, denominator, basis):
             'status': 'Measured' if denominator else 'Not measured', 'basis': basis}
 
 
-def item_key(item, fields):
-    return tuple(' '.join(str(item[field]).casefold().split()) for field in fields)
+def item_key(item, fields, names=None):
+    values = []
+    for field in fields:
+        value = ' '.join(str(item[field]).casefold().split())
+        if names and field in ('name', 'canonical_name', 'source', 'target', 'source_entity', 'target_entity'):
+            value = names.get(value, value)
+        values.append(value)
+    return tuple(values)
 
 
-def precision_recall(predicted, expected, fields):
-    predictions = Counter(item_key(item, fields) for item in predicted)
-    truth = Counter(item_key(item, fields) for item in expected)
+def reviewed_names(groups):
+    """Source-label adjudication only. Never fuzzy-merge or strip legal suffixes."""
+    names = {}
+    for group in groups or []:
+        if not isinstance(group, list) or len(group) < 2:
+            raise ValueError('reviewed name groups need at least two explicit names')
+        cleaned = []
+        for name in group:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError('nonempty reviewed names required')
+            cleaned.append(' '.join(name.casefold().split()))
+        if len(set(cleaned)) != len(cleaned) or any(name in names for name in cleaned):
+            raise ValueError('overlapping or duplicate reviewed name groups')
+        for name in cleaned:
+            names[name] = cleaned[0]
+    return names
+
+
+def precision_recall(predicted, expected, fields, names=None):
+    predictions = Counter(item_key(item, fields, names) for item in predicted)
+    truth = Counter(item_key(item, fields, names) for item in expected)
     correct = sum((predictions & truth).values())
     return correct, sum(predictions.values()), sum(truth.values())
 
@@ -39,7 +63,7 @@ def empty_metrics():
 
 
 def benchmark(chunks, observations, labels=None, evidence_reviews=None,
-              submission_attempts=None, sample_cost_usd=None, batch_timing=None, expanded_contract=False):
+              submission_attempts=None, sample_cost_usd=None, batch_timing=None, expanded_contract=False, ontology=None):
     """One observation per planned chunk, including missing/failed chunks.
 
     observations: chunk_id -> {raw_text: str, accepted: bool, entities: [],
@@ -49,11 +73,16 @@ def benchmark(chunks, observations, labels=None, evidence_reviews=None,
     relationship hash. Missing review cannot silently count as false or true.
     submission_attempts=None means history unavailable, not zero failures.
     """
-    from app.extraction.contracts import ExtractionPayload
-    schema = ExtractionPayload if expanded_contract else ExtractionResponse
-    entity_fields = ('canonical_name', 'entity_type') if expanded_contract else ('name', 'type')
-    edge_fields = ('relationship_type', 'source_entity', 'target_entity') if expanded_contract else ('relation', 'source', 'target')
-    evidence_field = 'evidence' if expanded_contract else 'evidence_quote'
+    if not expanded_contract:
+        raise ValueError(
+            'Old-format reports are no longer scored: app.extraction.validate was '
+            'removed with the Anthropic architecture. Score new expanded-contract '
+            'records with expanded_contract=True.')
+    from app.extraction.contracts import ExtractionPayload, ontology_contract
+    schema = ontology_contract(ontology) if ontology is not None else ExtractionPayload
+    entity_fields = ('canonical_name', 'entity_type')
+    edge_fields = ('relationship_type', 'source_entity', 'target_entity')
+    evidence_field = 'evidence'
     labels = labels or {}
     evidence_reviews = evidence_reviews or {}
     if set(observations) - set(chunks):
@@ -61,11 +90,12 @@ def benchmark(chunks, observations, labels=None, evidence_reviews=None,
     coverage = {'planned': len(chunks), 'returned_text': 0, 'schema_pass': 0,
                 'accepted': 0, 'reviewed_labels': 0, 'unreviewed_labels': 0,
                 'predicted_relationships': 0, 'reviewed_evidence': 0,
-                'contained_quotes': 0, 'latency_observations': 0}
+                'contained_quotes': 0, 'exact_quotes': 0, 'latency_observations': 0, 'reviewed_name_groups': 0}
     entity = empty_metrics()
     relationship = empty_metrics()
     supported = 0
     latencies = []
+    quality_review = []
     for chunk_id, source in chunks.items():
         if not isinstance(source, str):
             raise ValueError('chunk text must be a string')
@@ -89,20 +119,31 @@ def benchmark(chunks, observations, labels=None, evidence_reviews=None,
             if label.get('source_hash') != source_hash:
                 raise ValueError('reviewed labels do not match the original chunk')
             coverage['reviewed_labels'] += 1
+            names = reviewed_names(label.get('name_groups'))
+            coverage['reviewed_name_groups'] += len(label.get('name_groups', []))
             for target, predicted, expected, fields in (
                 (entity, predictions, label['entities'], entity_fields),
                 (relationship, relations, label['relationships'], edge_fields)):
-                correct, count, total = precision_recall(predicted, expected, fields)
+                correct, count, total = precision_recall(predicted, expected, fields, names)
                 target['correct'] += correct
                 target['predicted'] += count
                 target['expected'] += total
         else:
             coverage['unreviewed_labels'] += 1
+        if accepted:
+            confidences = [item['confidence'] for item in predictions + relations if 'confidence' in item]
+            words = len(source.split())
+            quality_review.append({'chunk_id': chunk_id, 'word_count': words,
+                'empty_entities': not predictions, 'empty_relationships': not relations,
+                'long_empty_output': words > 150 and not predictions and not relations,
+                'minimum_self_reported_confidence': min(confidences) if confidences else None,
+                'note': 'Review signal only. Length and model confidence do not prove errors or authorize fallback.'})
         for edge in relations:
             coverage['predicted_relationships'] += 1
             quote = edge.get(evidence_field)
             contained = isinstance(quote, str) and bool(quote.strip()) and squash_spaces(quote) in squash_spaces(source)
             coverage['contained_quotes'] += int(contained)
+            coverage['exact_quotes'] += int(isinstance(quote, str) and bool(quote.strip()) and quote in source)
             review = evidence_reviews.get(chunk_id, {}).get(identity(edge))
             if review and review.get('reviewed') is True:
                 if review.get('source_hash') != source_hash:
@@ -118,7 +159,9 @@ def benchmark(chunks, observations, labels=None, evidence_reviews=None,
                 raise ValueError('latency must be finite nonnegative measured seconds')
             latencies.append(latency)
     coverage['latency_observations'] = len(latencies)
-    report = {'coverage': coverage,
+    report = {'coverage': coverage, 'quality_review': quality_review,
+        'exact_quote_containment_rate': measured_ratio(coverage['exact_quotes'], coverage['predicted_relationships'],
+            'Raw case-sensitive substring, without whitespace normalization; not semantic accuracy.'),
         'json_schema_pass_rate': measured_ratio(coverage['schema_pass'], coverage['returned_text'],
             'Raw returned text before normalization; not ontology or factual correctness. See return coverage.'),
         'returned_output_coverage': measured_ratio(coverage['returned_text'], len(chunks), 'All planned chunks.'),
@@ -138,8 +181,10 @@ def benchmark(chunks, observations, labels=None, evidence_reviews=None,
             'basis': 'HTTP 429 responses / all observed submission HTTP attempts; GET polls excluded.'},
         'warning': 'Offline tests and schema acceptance do not measure factual accuracy. No provider selection is implied.'}
     for name, totals in (('entity', entity), ('relationship', relationship)):
+        report[name + '_f1'] = measured_ratio(2 * totals['correct'], totals['predicted'] + totals['expected'],
+            'Micro F1: 2*correct/(predicted+expected). Source-bound reviewed name_groups apply only when explicitly supplied.')
         report[name + '_precision'] = measured_ratio(totals['correct'], totals['predicted'],
-            'Accepted predictions on source-bound reviewed labels, including reviewed-empty chunks.')
+            'Accepted predictions on source-bound reviewed labels, including reviewed-empty chunks. Explicit reviewed name_groups only; otherwise case/space-normalized exact names.')
         report[name + '_recall'] = measured_ratio(totals['correct'], totals['expected'],
             'Expected items across reviewed chunks; missing or rejected outputs count as missed.')
     if sample_cost_usd is not None:

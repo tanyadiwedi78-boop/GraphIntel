@@ -235,72 +235,174 @@ writes inside Phase 1. They are not implemented by this extraction module.
 Source-local alias normalization and saved provenance are input to that work,
 not a replacement for embedding-threshold evaluation or graph ingestion.
 
-## Prepared Phase 1 path: Gemini primary, OpenAI fallback
+## Current prepared Phase 1: final two-provider design
 
-This local revision adds a separate, connected path. The older Anthropic command
-and its saved claims remain untouched. It does not reuse an old failed claim as
-permission to submit anything again.
-
-```
-chunks.jsonl -> immutable plan -> one Gemini request -> strict common contract
-                                  |
-                     known 429 only, separate authority + remaining call budget
-                                  -> optional OpenAI request
-validated checkpoint -> benchmark / source review -> identity review -> graph plan
-```
-
-Normal work uses one inference per uncached chunk. All later stages reuse that
-output, without an LLM judge or repair pass. Local result caching is not provider
-prompt caching. Processing many selected chunks locally is not an async provider
-Batch API request and does not promise a batch discount or free paid features.
-
-The existing `scripts/run_extraction.py` accepts the new `phase1` subcommand:
+This section supersedes the earlier Phase1 behavior descriptions. Older commands,
+raw jobs, claims, results and local stashes remain preserved. No old failed job
+is silently migrated, resubmitted or repurposed. New work uses a NEW job folder.
+Main remains e81aa5b until separately approved placement; this revision is local.
 
 ```
-python scripts/run_extraction.py phase1 prepare --chunks data/chunks.jsonl --job data/phase1-v2 --gemini-model VERIFIED_MODEL_ID --max-output-tokens VERIFIED_OUTPUT_LIMIT --output data/phase1-plan-summary.json
-python scripts/run_extraction.py phase1 report --job data/phase1-v2 --output data/phase1-unmeasured-report.json
-python scripts/run_extraction.py phase1 resolve --job data/phase1-v2 --output data/phase1-resolution.json
+Original SEC chunks + document SHA256 + fixed ontology
+ -> immutable plan + retry policy + verified prices + document/total USD limits
+ -> Gemini extraction -> validation -> bounded retries/backoff
+ -> optional authorized OpenAI only after retry exhaustion
+ -> source review -> saved-output diagnostics -> tuned identity resolution
+ -> reviewed Neo4j MERGE plan -> separately authorized write/read-back
+
+Independent benchmark:
+same chunks / prompt / schema / labels / output ceiling / retry policy / mode
+ -> Gemini-only job               -> OpenAI-only job
+ -> separate reviewed results    -> paired report (no fallback or cache reuse)
 ```
 
-`VERIFIED_MODEL_ID` and `VERIFIED_OUTPUT_LIMIT` are placeholders, not chosen
-settings. Preparing, reporting and resolving do not contact a provider or DB.
-`prepare` snapshots every selected JSONL chunk, the ontology, prompt/schema
-versions and explicit provider recipe. It refuses to overwrite an existing plan.
+The common strict schema includes all requested fields. Extraction NEVER directly
+creates graph nodes or writes Cypher. No Qwen or third provider is on this route.
+Normal uncached output costs one inference. Default retries=2 means at most3
+requests per provider per chunk, up to6 with authorized fallback. --max-calls is
+TOTAL attempts across restarts, not a dollar limit. Every failure is retained.
 
-A future authorized run needs `--execute-authorized`, an explicit total-job
-`--max-calls`, verified `--rpm` and `--tpm`, and the provider key in the environment.
-No live run was used to prepare this revision. Flags record a caller decision;
-they do not verify account eligibility or create spending permission. Call count
-is not a dollar cap. OpenAI is opt-in at prepare time via `--openai-model`, then
-requires separate `--paid-fallback-authorized` at run time. It is never attempted
-on an unknown POST outcome, an invalid answer, or an auth/billing/config failure.
-Only a known HTTP 429 can trigger it, and only within the shared call budget.
+Known-invalid returned JSON/schema/ontology/quote output can retry the SAME
+prompt/schema, so the comparison inputs stay identical. Known HTTP429/500/502/
+503/504 can retry with exponential backoff2,4,...seconds, bounded at120seconds,
+respecting Retry-After. A longer/unparseable Retry-After pauses rather than being
+ignored. Only after primary retry exhaustion may OpenAI run with separate paid
+scope and its own quotas. Auth/billing/config failures, refusals/incomplete
+outputs and unknown transport/POST outcomes DO NOT trigger retries or fallback.
+A transport timeout can mean the request was charged; reconcile, never erase its
+claim. Known HTTP5xx retries may also cost money, so all are reserved separately.
+No automatic LLM-judge or hidden SDK retries. End-to-end quality still needs review.
 
-The runner is deliberately sequential. It spaces requests and reserves a
-conservative UTF-8-byte input allowance plus the output ceiling in a local
-one-minute token window. This is not exact billing-token accounting or an
-account-wide quota guarantee. Other processes, daily limits and provider-specific
-reasoning/token rules still require checking before a live run. Restarting waits
-conservatively rather than bursting. `--cache PATH` enables exact-result reuse.
+### Document hash, cost budget and cache contract
 
-### Quality and failure criteria
+Every original chunk must carry a full64hex document_hash OR source_sha256 from
+the original document. Both, when present, must agree. Group budgets by that
+hash, not accession. No missing source hash is guessed. Exact-result caching
+also binds the full chunk, provenance, prompt, schema, ontology, both recipes,
+policy and execution mode. Document/source or recipe changes miss the cache.
+Checkpoint identity is revalidated on resume. Old jobs are report-only.
 
-- All required entity and relationship fields use one strict Pydantic schema.
-- Ontology, directed endpoints, source IDs and quote containment are checked
-  locally. Rejection does not silently prune an answer and call it correct.
-- Quote containment is not semantic evidence accuracy. Aliases, descriptions,
-  identity and claims remain unreviewed until source-bound review.
-- Each request gets an exclusive durable claim before sending and a saved raw
-  response/usage/status after it. Crashes and ambiguous outcomes never resubmit
-  automatically. A saved returned response can be recovered without a call.
-- A stale run lock, incomplete write, corrupt cache, changed plan/ontology/recipe,
-  or changed accepted checkpoint fails closed. Do not delete claims to retry.
-- Total attempt budget includes failures and fallback, across restarts. Account
-  or config failures stop the run. Long `Retry-After` instructions stop fallback
-  rather than being truncated into an early request.
-- Resume skips completed checkpoints. Cache identity includes original content,
-  document/provenance, prompt, schema, ontology and full provider recipe. A cache
-  hit is not a newly measured latency or evidence of factual correctness.
+Before execution, supply a verified pricing JSON snapshot by provider. No price,
+model, billing state, quota or spending authority has been invented for you:
+
+```json
+{
+  "gemini": {
+    "model": "VERIFIED_MODEL_ID", "verified": true,
+    "source": "OFFICIAL_PRICING_URL", "account_reference": "VERIFIED_PROJECT",
+    "currency": "USD", "mode": "standard", "checked_at": "UTC_ISO_TIMESTAMP",
+    "input_per_million_usd": "VERIFIED_HIGHEST_APPLICABLE_RATE",
+    "output_per_million_usd": "VERIFIED_HIGHEST_APPLICABLE_RATE",
+    "max_input_tokens": 0, "max_output_tokens": 0,
+    "free_tier_no_billing_verified": false
+  }
+}
+```
+
+Replace zero model ceilings with verified positive exact-model limits; these are
+NON-EXECUTABLE placeholders, not selected defaults. Include the OpenAI entry too
+if configured. Use the highest applicable prompt-size pricing tier, including
+billed reasoning output. The pricing snapshot expires after7days. Zero rates
+require explicit verified free-tier/no-billing state. Batch reservations use
+standard rates and never presume discount/free eligibility. Account verification
+and original authority references must be real; booleans/CLI flags do not create
+permission. Input/output model limits must cover ALL billed text/reasoning; no
+media/tools/search/cached-discount pricing is assumed.
+
+Cost-limit JSON for one job:
+```json
+{"authority_reference":"ORIGINAL_APPROVAL_REFERENCE","total_usd":"APPROVED_USD",
+ "documents":{"ORIGINAL_DOCUMENT_SHA256":"APPROVED_DOCUMENT_USD"}}
+```
+
+The pre-run maximum reserves full verified model input AND output ceilings for
+every allowed retry/fallback attempt. This is intentionally conservative, not a
+cheap token estimate. It can reject a small budget even when likely spend would
+be less. Durable claims reserve each attempt before network, including unknown
+outcomes, and reservation totals survive restarts. It is a LOCAL admission guard,
+not a merchant/provider hard cap or a guarantee against changed prices/incorrect
+configuration. Actual charges remain separate, reviewed ledger evidence. Do not
+relax this guard to make a budget fit. Tighten only after verified provider token
+counting and exact-model output semantics are available. No such extra API call
+is silently introduced by this version.
+
+### Connected command order (PowerShell, original folder)
+
+Stay in C:\Users\dell\Multi_hop_Graphrag. Preserve .env/data/stashes; don't pop
+old edits, reset, delete claims or copy complete files over newer unreviewed work.
+Use .\.venv\Scripts\python.exe in this SAME folder. Model IDs, limits, key
+access, filenames and reviews must be resolved before live commands. Keys belong
+in your existing private environment, never a page/chat/output file.
+
+Offline production preparation:
+```
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 prepare --job data/phase1-final-new --chunks data/pilot-candidates.jsonl --gemini-model VERIFIED_GEMINI_MODEL --openai-model VERIFIED_OPENAI_MODEL --max-output-tokens VERIFIED_LIMIT --retries 2 --pricing data/verified-pricing.json --cost-limits data/approved-production-limits.json --output data/final-plan-summary.json
+```
+Omit --openai-model to prepare a primary-only job until fallback pricing/access is
+ready; that does not remove the selected production architecture. A plan without
+prices/limits can be inspected offline but WILL NOT EXECUTE. --max-output-tokens
+must be common across comparison providers. No actual model has been selected.
+
+Offline paired preparation, both independent:
+```
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 compare-prepare --job data/paired-final-new --chunks data/pilot-candidates.jsonl --gemini-model VERIFIED_GEMINI_MODEL --openai-model VERIFIED_OPENAI_MODEL --max-output-tokens VERIFIED_LIMIT --retries 2 --pricing data/verified-pricing.json --cost-limits data/approved-paired-limits.json --labels data/reviewed-labels.json --output data/paired-manifest-summary.json
+```
+Paired cost-limits JSON is {"gemini": SINGLE_JOB_LIMITS, "openai": SINGLE_JOB_LIMITS}.
+Labels are frozen before both runs. Retries repeat the same prompt/schema; record
+model-specific default reasoning differences rather than pretending internals
+are identical. No sampling parameters are secretly translated between APIs.
+
+After separate execution/spending approval ONLY, run each job with its VERIFIED
+local limits and key. Example template, not an instruction to spend now:
+```
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 run --job data/paired-final-new/gemini --max-calls APPROVED_TOTAL_ATTEMPTS --rpm VERIFIED_RPM --tpm VERIFIED_TPM --execute-authorized --output data/gemini-run-new.json
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 run --job data/paired-final-new/openai --max-calls APPROVED_TOTAL_ATTEMPTS --rpm VERIFIED_RPM --tpm VERIFIED_TPM --execute-authorized --output data/openai-run-new.json
+```
+Production run uses the production job instead. Add --paid-fallback-authorized
+ONLY under actual paid scope, plus --fallback-rpm/--fallback-tpm separately.
+No fallback flag in either comparison job. Comparison forbids --cache; production
+sync jobs may use --cache data/phase1-response-cache. RPM/TPM are local pacing
+bounds, not account-wide RPD/quota guarantees. No full-corpus start yet.
+
+Review exact entity/relationship predictions against original text, not only
+copied-quote containment. Supply each provider's reviews/actual-charge ledger
+under its own key before the paired report:
+```
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 compare --job data/paired-final-new --evidence-reviews data/paired-evidence-reviews.json --cost-ledger data/paired-actual-costs.json --output data/paired-report-new.json
+```
+Missing results count as recall misses; unreviewed evidence and unknown costs
+remain Not measured. First-attempt metrics, each-attempt raw schema rates and
+final post-retry results stay distinct. Do not pick a winner from JSON validity
+alone or claim a universal best provider from one small sample.
+
+### Native provider batch mode, not packed prompts
+
+Prepare the same production or paired job with --execution-mode native_batch.
+Each chunk remains its OWN inference with the same prompt/schema. Gemini uses
+bounded inline generateContent Batch API; OpenAI uploads JSONL requests for its
+Responses Batch API. This is not Interactions. No SDK, extra worker or queue
+service is added. Up to1000requests and local15MiB serialized wave, bounded further
+by verified provider request/enqueue allowances. Large groups must be prepared as
+smaller immutable jobs; no source is silently truncated.
+
+After actual batch/spending authorization ONLY:
+```
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 batch-submit --job data/JOB --max-calls APPROVED_TOTAL_ATTEMPTS --batch-max-requests VERIFIED_LOCAL_REQUEST_LIMIT --batch-max-input-units VERIFIED_LOCAL_ENQUEUE_TOKEN_ALLOWANCE --execute-authorized --output data/batch-wave1-submit-new.json
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 batch-collect --job data/JOB --wave 1 --output data/batch-wave1-collect-new.json
+```
+Collection makes ONE read-only status check, no polling loop or implicit inference
+retry. Recheck no more often than hourly or use the provider's completion alert.
+If pending, later collect uses a NEW output filename. Once collected, invoke
+batch-submit again only for remaining known failures within approved call/dollar
+limits. Backoff applies between waves. Fallback uses a separate provider wave
+only after primary exhaustion; add paid-fallback scope explicitly. A lost create
+receipt or missing item stays unresolved and blocks new submission. If OpenAI
+upload succeeded but create failed, reconcile provider resources; no file delete
+is automatic. Known-invalid results can retry; refusal/auth/unknown does not.
+Native batch reports collection turnaround separately; per-chunk latency and
+HTTP429frequency remain unmeasured when the service provides no such timestamps/
+HTTPstatuses. Never divide turnaround by chunk count and call it inference time.
+To compare latency, use the identical synchronous mode for both providers.
 
 ### Seven benchmark groups, one set of saved outputs
 
@@ -415,3 +517,148 @@ before similarity. The verified package ranges are SentenceTransformers3.4.1
 within major3 and Neo4j5.28.8 within major5. CPU-only Torch installation is a
 separate environment choice; do not assume a generic install is small or that a
 pretrained model has the tiny smoke model's memory footprint.
+
+
+### Careful integration of the later extraction guide
+
+The existing 7 entity / 9 relationship SEC ontology is frozen in one config.
+The common contract now derives local Pydantic Literal types AND provider JSON
+schema from that snapshot. No replacement Person/Organization ontology, SQLite,
+Redis, LiteLLM or extra provider was added. evidence is the existing exact-quote
+field; relationships already carry source/target/type/source_chunk_id/evidence.
+Literal/schema checks limit type names, not hallucinated values or factual truth.
+Contract v3 changes require a NEW plan; old jobs remain readable, not runnable.
+
+Default is still 2 retries. Use --retries 1 at NEW preparation if selecting the
+pasted guide's one-retry policy; both independent comparison jobs use the same
+bound. Known invalid output already triggers retries then separately authorized
+fallback. Empty output can be correct even at >150 words. quality_review reports
+long_empty_output and minimum_self_reported_confidence without declaring error,
+changing acceptance, forcing new facts or spending on another request. There is
+no calibrated confidence cutoff yet and no hidden LLM judge call. Semantic quote
+support still requires source review, not a claimed 90% detection guarantee.
+
+Reports now include entity_f1, relationship_f1, exact_quote_containment_rate
+(raw case-sensitive substring), the existing whitespace-normalized containment,
+and source-reviewed evidence_accuracy. F1 uses counts directly, so a completely
+missing output scores zero recall/F1 against nonempty reviewed truth even when
+precision has no denominator. No labels still means Not measured, not zero.
+
+Optional source-reviewed name equivalences are frozen in each label object:
+  "name_groups": [["Acme", "Acme Corp"]]
+This applies only on a label marked reviewed:true with the exact source_hash.
+Groups cannot overlap, contain duplicates or empty names. They apply only to
+entity/endpoint names, never types, relation direction or quotes. No automatic
+suffix stripping/fuzzy equivalence/LLM opinion is counted as ground truth.
+A judge can suggest adjudication later, under separate approved call budgets,
+but cannot silently rewrite these labels or certify its own answer. No judge
+has run or been measured. Freeze/adjudicate labels before both provider runs.
+
+Calibrate on reviewed matches AND nonmatches with the installed local embedder.
+No separating score means blocked; do not fall back to 0.92. Both raw names and
+aliases remain intact. Then test disjoint reviewed identity pairs with the same
+model/calibration through the ACTUAL canonical-ID resolver, not just cosine:
+
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 identity-eval `
+  --job "$newJob" --identity-pairs "$heldoutPairs" `
+  --embedding-model-path "$localModel" --calibration "$calibration" `
+  --output "$identityEvalOutput"
+
+Use NEW output paths. The four variables are existing selected input/output
+paths, not files supplied by this command. Identity-eval makes local CPU calls,
+not provider calls or DB requests. Requires calibration pair_hashes, refuses
+repeated/reversed calibration/heldout pairs, requires both classes, and reports
+canonicalization_accuracy, pair precision/recall/F1 and unresolved coverage.
+Pair-hash separation is not proof of unseen entities/documents or corpus-level
+cluster accuracy. Keep calibration and held-out entity/document groups separate
+when building a real quality benchmark, not just different pair combinations.
+
+The 20 original chunks are a review candidate pool, mostly one issuer and many
+financial tables, NOT a balanced certified golden set. The review packet binds
+all20 source hashes/text and marks only the2existing assistant-reviewed labels
+reviewed:true. The other18 are UNREVIEWED, with null expected lists rather than
+invented gold. Before quality claims, complete ideal labels for 15-20 genuinely
+representative chunks, including pronouns, defined aliases, nested entities,
+negation, potential-vs-current risk, tables and reviewed-empty controls. Add
+negative identity pairs for similarly named distinct companies. Reviewer identity
+and label scope stay explicit. Do not just mark empty arrays reviewed to finish.
+No 10-second/$0.05/runtime/accuracy guarantee is asserted. Exact current model
+choices, availability, rates and relative quality must be checked and measured.
+
+
+### Fresh extraction after your local deletion: no restoration required
+
+This route does NOT import the deleted extraction runner.py, client.py,
+validate.py, anthropic_batch.py or batch_storage.py. Its extraction runtime is
+contracts.py + providers.py + pipeline.py. The entry point routes phase1 first,
+without importing any old module. Optional historical commands are not needed
+and are not instructions to restore old files. The expanded benchmark also
+avoids the historical validator; only explicit old-format reports can use it.
+Do not overwrite a surviving ontology/graph file simply because it appears here.
+Full non-extraction dependencies are included for inspection/completeness; match
+her actual local Git status before placement, keeping chunks/.env/stashes intact.
+
+Folder tree of this complete route (all ten complete files appear below):
+app/
+  extraction/
+    contracts.py
+    providers.py
+    pipeline.py
+  evaluation/
+    extraction_benchmark.py
+  graph/
+    ontology.py
+    construction.py
+    resolution.py
+    neo4j_store.py
+configs/
+  ontology.json
+scripts/
+  run_extraction.py
+
+Existing package __init__.py files can remain; these directories also work as
+Python namespace packages in the deletion-simulation test. No old extraction
+files are needed for Phase1 help, demo, prepare or the expanded report route.
+Core extraction needs Python3.10+ and Pydantic2; live .env loading needs the
+existing python-dotenv dependency. Local identity and Neo4j stages separately
+need their already-listed sentence-transformers/neo4j packages. No automatic
+installation, download, model call or DB connection happens when importing.
+
+AFTER matching/placing the complete prepared route, the first output command is:
+
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 demo `
+  --output phase1-demo-review-1.json
+Get-Content .\phase1-demo-review-1.json
+
+This creates ONE new file in the current original project folder. If that file
+exists, pick a new numbered output; do not delete/overwrite it. It runs no API,
+uses no key, spends nothing and touches no database. The source is the synthetic
+sentence "Acme develops Widget." The returned JSON clearly calls the response a
+HAND-WRITTEN fixture, not extraction by an LLM. It shows entities, directed
+relation, copied evidence, successful Pydantic/source checks and rejection of
+an invented quote. Model-proposed confidence is a fixture number, not measured
+accuracy. This verifies local wiring only. Real extraction then uses the saved
+SEC source plan, explicitly verified model/account and authorized budget.
+
+These commands are NOT claimed to run on the laptop right now. Tanya deleted
+old files; her exact remaining local paths/version are still unverified. The
+local Git check is placement safety only and does not block building this route.
+The new route was separately tested in a tree containing ONLY these ten files,
+with every historical extraction module absent: help, demo and prepare passed.
+All stage commands in this guide use the phase1 prefix. Live stages load .env
+from the original project root, without overriding existing environment values.
+Never paste .env contents or keys into chat or this File.
+
+
+### Entry-point correction after the partial local edit
+
+Replace the WHOLE scripts/run_extraction.py from the clearly labelled copy button
+near First visible output, not only the Anthropic import line. No historical
+provider import remains anywhere in this small entry point. With no arguments it
+prints safe guidance before importing the pipeline. To actually test local wiring:
+.\.venv\Scripts\python.exe scripts/run_extraction.py phase1 --help
+No model or DB calls happen. Help can still expose mixed/missing local dependencies;
+that is an installation issue to inspect, not permission to restore old providers.
+Do not commit/Continue/stage the merge until local files and intended deletions are
+reviewed. The verified backup stays untouched. Tests of historical modules now call
+those modules explicitly, not the new two-provider-only entry point; none were skipped.

@@ -20,5 +20,3 @@ if __name__ == '__main__':
 
     from app.extraction.pipeline import main
     raise SystemExit(main(arguments[1:]))
-
-

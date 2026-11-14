@@ -59,11 +59,15 @@ def calibrate(pairs, embedder):
     """
     positive = []
     negative = []
+    pair_hashes = []
     for pair in pairs:
         expected_hash = identity([pair['left'], pair['right']])
         if (pair.get('reviewed') is not True or pair.get('pair_hash') != expected_hash
                 or type(pair.get('same_entity')) is not bool):
             raise ValueError('source-bound reviewed identity pairs required')
+        if expected_hash in pair_hashes:
+            raise ValueError('duplicate calibration pair')
+        pair_hashes.append(expected_hash)
         if pair['left']['entity_type'] != pair['right']['entity_type']:
             raise ValueError('calibrate within the same entity type; type filtering already separates other types')
         vectors = embedder([entity_text(pair['left']), entity_text(pair['right'])])
@@ -74,7 +78,7 @@ def calibrate(pairs, embedder):
     if max(negative) >= min(positive):
         raise ValueError('no separating threshold on reviewed examples; automatic resolution blocked')
     return {'model_fingerprint': embedder.fingerprint, 'threshold': min(positive),
-            'calibration_hash': identity(pairs), 'matches': len(positive), 'nonmatches': len(negative),
+            'calibration_hash': identity(pairs), 'pair_hashes': pair_hashes, 'matches': len(positive), 'nonmatches': len(negative),
             'warning': 'Separates this calibration sample only, not a general identity-accuracy guarantee.'}
 
 
@@ -162,3 +166,59 @@ def global_resolve(records, registry, embedder, calibration, identity_reviews=No
                     registry_target=registry.get('target'), extraction_hash=identity(records),
                     requires_semantic_review=True)
     return resolved
+
+
+def evaluate_resolution(pairs, embedder, calibration):
+    """Held-out pair decisions through the actual canonical-ID resolver, offline.
+
+    A pair metric is not a corpus clustering score or proof of graph identity.
+    Positive and negative examples are both required, disjoint from calibration.
+    """
+    calibration_pairs = calibration.get('pair_hashes')
+    if not isinstance(calibration_pairs, list) or not calibration_pairs:
+        raise ValueError('calibration pair hashes required to check held-out separation')
+    seen = set(calibration_pairs)
+    decisions = []
+    tp = fp = fn = tn = unresolved = 0
+    expected_classes = set()
+    for pair in pairs:
+        pair_hash = identity([pair['left'], pair['right']])
+        reverse_hash = identity([pair['right'], pair['left']])
+        if (pair.get('reviewed') is not True or pair.get('pair_hash') != pair_hash
+                or type(pair.get('same_entity')) is not bool):
+            raise ValueError('source-bound reviewed held-out identity pairs required')
+        if pair_hash in seen or reverse_hash in seen:
+            raise ValueError('held-out pairs overlap calibration or repeat/reverse another pair')
+        seen.add(pair_hash)
+        expected = pair['same_entity']
+        expected_classes.add(expected)
+        left = dict(pair['left'])
+        left.update(id='heldout-canonical-left', embedding=embedder([entity_text(left)])[0],
+                    model_fingerprint=embedder.fingerprint)
+        right = dict(pair['right'])
+        right.update(source_chunk_id='heldout-pair')
+        records = [{'accepted': True, 'source_hash': pair_hash, 'chunk_id': 'heldout-pair',
+                    'entities': [right], 'relationships': []}]
+        result = global_resolve(records, {'version': 'heldout-only', 'entities': [left]}, embedder, calibration)
+        if result['status'] == 'Needs identity review':
+            predicted = None
+            unresolved += 1
+        else:
+            predicted = result['decisions'][0]['entity_id'] == left['id']
+        tp += int(expected and predicted is True)
+        fp += int(not expected and predicted is True)
+        fn += int(expected and predicted is not True)
+        tn += int(not expected and predicted is False)
+        decisions.append({'pair_hash': pair_hash, 'expected_same_entity': expected,
+                          'reused_canonical_id': predicted, 'status': result['status']})
+    if expected_classes != {True, False}:
+        raise ValueError('held-out evaluation needs reviewed matches AND nonmatches')
+    from app.evaluation.extraction_benchmark import measured_ratio
+    return {'model_fingerprint': embedder.fingerprint, 'calibration_hash': calibration['calibration_hash'],
+            'heldout_hash': identity(pairs), 'pairs': len(pairs), 'unresolved': unresolved,
+            'canonicalization_accuracy': measured_ratio(tp + tn, len(pairs), 'Actual resolver canonical-ID decisions; unresolved is not correct.'),
+            'match_precision': measured_ratio(tp, tp + fp, 'Predicted same canonical ID.'),
+            'match_recall': measured_ratio(tp, tp + fn, 'Reviewed same-identity pairs; unresolved counts as missed.'),
+            'match_f1': measured_ratio(2 * tp, 2 * tp + fp + fn, 'Pair matching F1, not full-corpus clustering accuracy.'),
+            'decisions': decisions, 'writes_performed': False,
+            'warning': 'Held-out on pair hashes, not necessarily unseen entities/documents. No DB or model API call.'}
