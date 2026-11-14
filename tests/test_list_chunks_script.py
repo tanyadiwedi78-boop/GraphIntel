@@ -51,7 +51,7 @@ def printed_sample_ids(output):
     for line in output.splitlines():
         line = line.strip()
         for marker in ("1. ", "2. ", "3. ", "4. ", "5. "):
-            if line.startswith(marker):
+            if line.startswith(marker) and line[len(marker):].startswith("chunk-"):
                 ids.append(line[len(marker):].split()[0])
     return ids
 
@@ -67,9 +67,11 @@ def test_write_subset_creates_file_and_prints_matching_commands(tmp_path):
     assert [row["chunk_id"] for row in written] == ids
     assert f"--chunks {subset}" in result.stdout
     assert "--chunks data/chunks/chunks.jsonl" not in result.stdout
-    assert "run_extraction.py phase1 prepare" in result.stdout
-    assert "--output data/sample-job-prepare.json" in result.stdout
+    assert "run_extraction.py phase1 compare-prepare" in result.stdout
+    assert "--labels data/labels_sample.json" in result.stdout
+    assert "--output data/compare-sample-prepare.json" in result.stdout
     assert "Do NOT run this yet" in result.stdout
+    assert "Fallback stays OFF" in result.stdout
     assert "python -m app.extraction.pipeline" not in result.stdout
 
 

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.evaluation.extraction_benchmark import identity
 from app.extraction.contracts import CONTRACT_VERSION
 from scripts import review_extraction as review
 
@@ -124,13 +125,18 @@ def test_incompatible_contract_is_not_scored_as_valid(tmp_path, capsys):
 
 def test_label_template_starts_unreviewed_and_preserves_completed_labels(tmp_path, capsys):
     settings, job = job_dir(tmp_path, None)
+    second = dict(CHUNK, chunk_id="c2", text="Acme mentions Other Co.")
+    with (tmp_path / "chunks" / "chunks.jsonl").open("a", encoding="utf-8") as out:
+        out.write(json.dumps(second) + "\n")
     path = tmp_path / "labels.json"
     path.write_text(json.dumps({"c1": {"reviewed": True, "entities": ENTITIES,
                                        "relationships": RELATIONS, "notes": "done"}}))
     assert review.run_write_labels(settings, ["c1", "c2"], path) == 0
     written = json.loads(path.read_text())
     assert written["c1"]["notes"] == "done"  # completed work never overwritten
-    assert written["c2"] == {"entities": [], "relationships": [], "notes": "", "reviewed": False}
+    assert written["c2"]["entities"] == [] and written["c2"]["relationships"] == []
+    assert written["c2"]["reviewed"] is False
+    assert written["c2"]["source_hash"] == identity("Acme mentions Other Co.")
 
 
 def test_canonical_labels_do_not_use_fuzzy_alias_scoring(tmp_path, capsys):

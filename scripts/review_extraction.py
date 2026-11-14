@@ -37,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import ConfigError, load_settings
+from app.evaluation.extraction_benchmark import identity
 from app.extraction.contracts import CONTRACT_VERSION
 from app.extraction.pipeline import PROMPT_VERSION
 
@@ -163,6 +164,24 @@ def run_sheets(settings, chunk_ids: list, results_dir=None) -> int:
 
 
 def run_write_labels(settings, chunk_ids: list, labels_path: Path) -> int:
+    chunks_path = settings.data_dir / "chunks" / "chunks.jsonl"
+    if not chunks_path.exists():
+        print(f"No chunks at {chunks_path}. Run scripts/build_chunks.py first.")
+        return 1
+    chunks = read_chunks(chunks_path)
+    by_id = {}
+    for chunk in chunks:
+        by_id[str(chunk.get("chunk_id"))] = chunk
+    unknown = []
+    for chunk_id in chunk_ids:
+        if chunk_id not in by_id:
+            unknown.append(chunk_id)
+    if unknown:
+        print(f"Unknown chunk ids (not in {chunks_path}):")
+        for chunk_id in unknown:
+            print(f"  {chunk_id}")
+        print("No labels file written. Check the ids and try again.")
+        return 1
     labels = {}
     if labels_path.exists():
         with open(labels_path, "r", encoding="utf-8") as f:
@@ -173,7 +192,8 @@ def run_write_labels(settings, chunk_ids: list, labels_path: Path) -> int:
     added = 0
     for chunk_id in chunk_ids:
         if chunk_id not in labels:
-            labels[chunk_id] = {"entities": [], "relationships": [], "notes": "", "reviewed": False}
+            labels[chunk_id] = {"entities": [], "relationships": [], "notes": "", "reviewed": False,
+                                "source_hash": identity(by_id[chunk_id].get("text", ""))}
             added = added + 1
     labels_path.parent.mkdir(parents=True, exist_ok=True)
     with open(labels_path, "w", encoding="utf-8") as f:

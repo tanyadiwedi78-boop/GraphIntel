@@ -113,25 +113,26 @@ def print_sample(chunks: list, picked: list, subset_path) -> None:
     print("")
     print(f"Wrote {len(picked)} chunks to {subset_path}")
     print("")
-    print("Do NOT run this yet: prepare an OFFLINE plan (no provider calls) only after")
-    print("your Gemini model and current AI Studio limits are verified. Replace MODEL then.")
+    print("Next steps for the paired Gemini vs OpenAI comparison (same chunks, prompt, schema and labels):")
     print("")
-    print("python scripts/run_extraction.py phase1 prepare --job data/sample-job "
-          f"--chunks {subset_path} --gemini-model MODEL --max-output-tokens 4096 "
-          "--output data/sample-job-prepare.json")
+    print("1. Read each chunk's source text (offline):")
     print("")
-    print("Review the immutable plan before approving any execution; a run needs")
-    print("--execute-authorized plus verified --rpm/--tpm limits. Never repeat a batch")
+    print("   python scripts/review_extraction.py --chunk-ids " + joined)
+    print("")
+    print("2. Create the labels file, fill each entry from the source text, set reviewed true (offline):")
+    print("")
+    print("   python scripts/review_extraction.py --chunk-ids " + joined + " --write-labels data/labels_sample.json")
+    print("")
+    print("3. Do NOT run this yet - only after BOTH models and current account limits are verified.")
+    print("   Replace GEMINI_MODEL and OPENAI_MODEL then (offline plan, no provider calls):")
+    print("")
+    print("   python scripts/run_extraction.py phase1 compare-prepare --job data/compare-sample "
+          f"--chunks {subset_path} --gemini-model GEMINI_MODEL --openai-model OPENAI_MODEL "
+          "--max-output-tokens 4096 --labels data/labels_sample.json --output data/compare-sample-prepare.json")
+    print("")
+    print("Fallback stays OFF for the comparison so each provider's failures stay visible.")
+    print("A run needs --execute-authorized plus verified --rpm/--tpm limits. Never repeat a batch")
     print("submission after a timeout; reconcile its saved claim first.")
-    print("")
-    print("Then read each result next to its source text:")
-    print("")
-    print("python scripts/review_extraction.py --results-dir data/sample-job --chunk-ids " + joined)
-    print("")
-    print("Create the labels file, fill it in completely, then score it:")
-    print("")
-    print("python scripts/review_extraction.py --chunk-ids " + joined + " --write-labels data/labels_sample.json")
-    print("python scripts/review_extraction.py --results-dir data/sample-job --labels data/labels_sample.json")
 
 
 def main() -> int:
