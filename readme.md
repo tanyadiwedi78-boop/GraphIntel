@@ -273,6 +273,17 @@ A transport timeout can mean the request was charged; reconcile, never erase its
 claim. Known HTTP5xx retries may also cost money, so all are reserved separately.
 No automatic LLM-judge or hidden SDK retries. End-to-end quality still needs review.
 
+Prompt rules are frozen as one template per version. The current version,
+expanded-source-v3, adds one user-approved rule (15 November 2026): a FACES
+relationship is added only when the text makes a substantive, company-specific
+statement about the risk; a risk named only as an example in a general
+cautionary or safe-harbor passage gets no FACES relationship. Rules 1-9 and
+entity typing are unchanged. A job's plan names its prompt version and a resume
+rebuilds exactly that version's prompt, so saved expanded-source-v2 jobs keep
+the prompts they ran with and old answers are never reinterpreted under new
+rules. Whether a model follows the stricter rule is measured by a reviewed v3
+run, not by the test suite.
+
 ### Document hash, cost budget and cache contract
 
 Every original chunk must carry a full64hex document_hash OR source_sha256 from

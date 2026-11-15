@@ -5,10 +5,12 @@ Running list of changes, newest first.
 ## 2026-11-15 - stricter disclaimer-risk rule as prompt v3 (branch fix/transport-diagnostics)
 
 - `app/extraction/pipeline.py`: the user-approved stricter risk policy lands
-  as rule 10 in a new frozen prompt version `expanded-source-v3`: a risk
-  named only as an example in a general cautionary or safe-harbor passage is
-  not a risk the company faces; a FACES relationship needs a substantive,
-  company-specific statement. Rules 1-9 are unchanged.
+  as rule 10 in a new frozen prompt version `expanded-source-v3`: add a FACES
+  relationship only when the text makes a substantive, company-specific
+  statement about that risk; a risk named only as an example in a general
+  cautionary or safe-harbor passage does not get a FACES relationship. The
+  rule narrows only relationships; entity typing is untouched. Rules 1-9 are
+  unchanged.
 - Prompt rules are now kept as one frozen template per version
   (`PROMPT_RULES_BY_VERSION`). A job's plan names its prompt version and
   `Pipeline` rebuilds exactly that version's prompt on resume, so saved
@@ -17,8 +19,11 @@ Running list of changes, newest first.
   with. New prepares stamp v3. Saved results are never reinterpreted under
   new rules.
 - `tests/test_prompt_rules.py`: 4 new tests pin the version bump, the frozen
-  v2 template (v3 only appends rule 10), explicit-version prompt building,
-  unknown-version rejection and per-plan-version prompt rebuild on resume.
+  v2 template (v3 only appends rule 10), the edges-only wording of rule 10,
+  explicit-version prompt building, unknown-version rejection and
+  per-plan-version prompt rebuild on resume. These tests prove prompt and
+  version behavior only; whether a model actually follows rule 10 is measured
+  by a reviewed v3 run, not by this suite.
 - Suite after this change: 335 passed (Linux, Python 3.10.12). Windows and
   live provider runs untested from here.
 

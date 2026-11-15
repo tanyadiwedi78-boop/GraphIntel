@@ -46,7 +46,7 @@ PROMPT_RULES_V3 = """RULES:
 7. confidence is your honest estimate, from 0 to 1, that the text supports the item. Do not guess.
 8. A definition saying names refer to the same company or collectively to a company and its subsidiaries is not an ownership link between those names. Use one company name for aliases; never turn the company itself into a Subsidiary to make OWNS fit. Do not invent named subsidiaries from an unnamed collective.
 9. A specific potential risk can be a Risk even in forward-looking text, but its evidence must explicitly connect that risk to the company and keep words such as potential or may. Do not turn a possible impact into a realized fact. A heading alone states no relationship.
-10. A risk named only as an example in a general cautionary or safe-harbor passage is not a risk the company faces. Add a FACES relationship only when the text makes a substantive, company-specific statement about that risk.
+10. Add a FACES relationship only when the text makes a substantive, company-specific statement about that risk. A risk named only as an example in a general cautionary or safe-harbor passage does not get a FACES relationship.
 """
 
 PROMPT_RULES_BY_VERSION = {

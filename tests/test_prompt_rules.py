@@ -85,6 +85,10 @@ def test_stricter_risk_rule_bumps_version_and_keeps_v2_frozen():
     assert v3.startswith(v2)  # rules 1-9 unchanged; v3 only appends
     assert "substantive, company-specific statement" in v3
     assert "substantive, company-specific statement" not in v2
+    # The approved policy narrows only the FACES relationship, never the
+    # entity types: rule 10 must not declare the risk itself out of scope.
+    assert "does not get a FACES relationship" in v3
+    assert "is not a risk the company faces" not in v3
 
 
 def test_build_prompt_defaults_to_current_and_honours_explicit_version(ontology):
