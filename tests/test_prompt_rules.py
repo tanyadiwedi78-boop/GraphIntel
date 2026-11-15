@@ -71,3 +71,54 @@ def test_plan_identity_changes_with_prompt_version(tmp_path, ontology):
     original = dict(plan)
     original.pop("plan_hash")
     assert identity(changed) != identity(original)
+
+
+def test_stricter_risk_rule_bumps_version_and_keeps_v2_frozen():
+    # The approved stricter disclaimer-risk policy is rule 10 in a NEW prompt
+    # version. The v2 template stays byte-frozen so saved v2 jobs (including
+    # their pending recovery) rebuild exactly the prompts they were run with.
+    from app.extraction.pipeline import PROMPT_RULES_BY_VERSION
+    assert PROMPT_VERSION == "expanded-source-v3"
+    assert set(PROMPT_RULES_BY_VERSION) == {"expanded-source-v2", "expanded-source-v3"}
+    v2 = PROMPT_RULES_BY_VERSION["expanded-source-v2"]
+    v3 = PROMPT_RULES_BY_VERSION["expanded-source-v3"]
+    assert v3.startswith(v2)  # rules 1-9 unchanged; v3 only appends
+    assert "substantive, company-specific statement" in v3
+    assert "substantive, company-specific statement" not in v2
+
+
+def test_build_prompt_defaults_to_current_and_honours_explicit_version(ontology):
+    current = build_prompt(make_chunk(), ontology)
+    assert "substantive, company-specific statement" in current
+    old = build_prompt(make_chunk(), ontology, version="expanded-source-v2")
+    assert "substantive, company-specific statement" not in old
+    assert "RULES:" in old
+
+
+def test_build_prompt_rejects_unknown_version(ontology):
+    import pytest
+    with pytest.raises(ValueError):
+        build_prompt(make_chunk(), ontology, version="no-such-version")
+
+
+def test_pipeline_rebuilds_the_plan_version_prompt(tmp_path, ontology):
+    # A resume of a job frozen under v2 must send the v2 prompt even though
+    # the current default is v3; a v3 plan sends the v3 prompt.
+    import json as jsonlib
+    from app.evaluation.extraction_benchmark import identity
+    from app.extraction.pipeline import Pipeline
+    recipe = JSONProvider('gemini', 'gemini-fixture-model', 1024).recipe
+    job = tmp_path / "job"
+    prepare(job, [make_chunk()], ontology, recipe, policy=retry_policy(0))
+    provider = JSONProvider('gemini', 'gemini-fixture-model', 1024)
+    v3_pipe = Pipeline(job, ontology, provider)
+    assert "substantive, company-specific statement" in v3_pipe.prompt(make_chunk())
+    plan_path = job / "plan.json"
+    plan = jsonlib.loads(plan_path.read_text(encoding="utf-8"))
+    plan["prompt_version"] = "expanded-source-v2"
+    plan.pop("plan_hash")
+    plan["plan_hash"] = identity(plan)
+    plan_path.write_text(jsonlib.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    v2_pipe = Pipeline(job, ontology, provider)
+    assert "substantive, company-specific statement" not in v2_pipe.prompt(make_chunk())
+    assert "A specific potential risk can be a Risk" in v2_pipe.prompt(make_chunk())

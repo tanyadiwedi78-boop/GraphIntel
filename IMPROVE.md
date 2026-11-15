@@ -2,6 +2,26 @@
 
 Running list of changes, newest first.
 
+## 2026-11-15 - stricter disclaimer-risk rule as prompt v3 (branch fix/transport-diagnostics)
+
+- `app/extraction/pipeline.py`: the user-approved stricter risk policy lands
+  as rule 10 in a new frozen prompt version `expanded-source-v3`: a risk
+  named only as an example in a general cautionary or safe-harbor passage is
+  not a risk the company faces; a FACES relationship needs a substantive,
+  company-specific statement. Rules 1-9 are unchanged.
+- Prompt rules are now kept as one frozen template per version
+  (`PROMPT_RULES_BY_VERSION`). A job's plan names its prompt version and
+  `Pipeline` rebuilds exactly that version's prompt on resume, so saved
+  `expanded-source-v2` jobs (the 5-chunk smoke job, its two preserved
+  failures and its pending recovery) keep the exact v2 prompts they were run
+  with. New prepares stamp v3. Saved results are never reinterpreted under
+  new rules.
+- `tests/test_prompt_rules.py`: 4 new tests pin the version bump, the frozen
+  v2 template (v3 only appends rule 10), explicit-version prompt building,
+  unknown-version rejection and per-plan-version prompt rebuild on resume.
+- Suite after this change: 335 passed (Linux, Python 3.10.12). Windows and
+  live provider runs untested from here.
+
 ## 2026-11-05 - extraction schema: entities + relationships (main)
 
 - `app/extraction/prompt.py` (p2), `app/extraction/schema.py` (s2),
