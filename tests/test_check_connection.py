@@ -43,7 +43,9 @@ def test_all_ready_reports_ready_and_checks_every_host(module, capsys):
     loaded, calls = module
     assert loaded.main() == 0
     out = capsys.readouterr().out
-    assert 'Connection looks ready' in out
+    assert 'DNS and basic connections work' in out
+    assert 'does not prove the secure' in out
+    assert 'Connection looks ready' not in out  # no overclaim: TLS/key/API unproven
     assert out.count('resolves') == 2 and out.count('opens') == 2
     assert 'no request sent, no key used' in out
     assert calls == [('resolve', 'generativelanguage.googleapis.com'),

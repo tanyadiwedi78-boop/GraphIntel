@@ -1,9 +1,11 @@
 """Read-only connection check before a live extraction run.
 
-Answers one question in plain words: can this laptop reach the AI providers'
-servers right now? It looks up the server names and opens a bare connection.
-No request is sent, no API key is read, nothing is written. Safe to run as
-often as needed; it changes nothing.
+Answers one narrow question in plain words: do the provider server names
+resolve, and does a bare connection open? That is all it proves. A pass here
+does not prove the secure (TLS) handshake, the API key, the provider service
+or that extraction will work - the run itself checks those next. No request
+is sent, no API key is read, nothing is written. Safe to run as often as
+needed; it changes nothing.
 """
 import socket
 import sys
@@ -50,12 +52,14 @@ def main():
                   + type(error).__name__ + ' errno ' + str(getattr(error, 'errno', None)) + ')')
             print('  A firewall or the network is blocking it. Nothing was sent.')
         else:
-            print('OK: a connection to the ' + label + ' server opens (no request sent, no key used)')
+            print('OK: a basic connection to the ' + label + ' server opens (no request sent, no key used)')
     print()
     if problems:
         print('Connection is NOT ready. Fix the problem above, then run this check again.')
         return 1
-    print('Connection looks ready. You can run the extraction command when you choose.')
+    print('DNS and basic connections work. This does not prove the secure')
+    print('connection, your key, or the provider service; the extraction run')
+    print('checks those next, when you choose to run it.')
     return 0
 
 
