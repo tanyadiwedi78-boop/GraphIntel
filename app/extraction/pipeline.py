@@ -257,6 +257,7 @@ class Pipeline:
             result = {'http_status': error.status, 'outcome': error.kind,
                       'retry_after': error.retry_after, 'raw_text': None,
                       'transport_detail': error.detail,
+                      'provider_codes': error.provider_codes,
                       'cost_usd': None, 'request_seconds': self.clock() - started}
         # Unexpected error leaves a claim without result: no retry on resume.
         result.update(claim)

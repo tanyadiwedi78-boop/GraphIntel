@@ -107,7 +107,7 @@ class FakeProvider:
     def body(self, prompt, schema):
         return {'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
                 'generationConfig': {'maxOutputTokens': self.recipe['max_output_tokens'],
-                    'responseFormat': {'text': {'mimeType': 'application/json', 'schema': schema}}}}
+                    'responseFormat': {'text': {'mimeType': 'APPLICATION_JSON', 'schema': schema}}}}
 
     def output_text(self, data):
         candidates = data['candidates']

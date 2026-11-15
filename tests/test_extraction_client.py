@@ -65,11 +65,11 @@ class RecordingOpener:
         return FakeResponse(answer)
 
 
-def http_error(status, retry_after=None):
+def http_error(status, retry_after=None, body=b'x'):
     headers = {}
     if retry_after is not None:
         headers['Retry-After'] = retry_after
-    return HTTPError('https://example.invalid', status, 'error', headers, io.BytesIO(b'x'))
+    return HTTPError('https://example.invalid', status, 'error', headers, io.BytesIO(body))
 
 
 def make_client(provider='gemini', model='m1', limit=128, opener=None, monkeypatch=None):
@@ -105,6 +105,8 @@ def test_constructor_makes_no_call_and_request_carries_schema(monkeypatch):
     assert body['contents'][0]['parts'][0]['text'] == 'PROMPT TEXT'
     assert body['generationConfig']['maxOutputTokens'] == 128
     assert body['generationConfig']['responseFormat']['text']['schema'] == {'type': 'object'}
+    # Documented wire value is the enum name, not the MIME string.
+    assert body['generationConfig']['responseFormat']['text']['mimeType'] == 'APPLICATION_JSON'
     assert opener.requests == []
     openai = make_client(provider='openai', opener=opener, monkeypatch=monkeypatch)
     body = openai.body('PROMPT TEXT', {'type': 'object'})
@@ -221,7 +223,21 @@ def test_http_errors_have_one_attempt_and_safe_message(monkeypatch, status):
         client.call('p', {'type': 'object'})
     assert caught.value.kind == 'http_failure'
     assert caught.value.status == status
+    assert caught.value.provider_codes is None  # non-JSON body keeps no codes
     assert len(opener.requests) == 1  # the transport never retries on its own
+
+
+def test_http_error_keeps_only_provider_codes_not_prose(monkeypatch):
+    body = json.dumps({'error': {'code': 400, 'status': 'INVALID_ARGUMENT',
+                                 'message': 'prose that may echo request data',
+                                 'details': [{'reason': 'API_KEY_INVALID'}]}}).encode()
+    opener = RecordingOpener(http_error(400, body=body))
+    client = make_client(opener=opener, monkeypatch=monkeypatch)
+    with pytest.raises(CallFailure) as caught:
+        client.call('p', {'type': 'object'})
+    assert caught.value.provider_codes == {'status': 'INVALID_ARGUMENT',
+                                           'reasons': ['API_KEY_INVALID']}
+    assert 'prose' not in str(caught.value)
 
 
 def test_retry_after_header_is_parsed(monkeypatch):

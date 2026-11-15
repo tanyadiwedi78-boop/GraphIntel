@@ -26,12 +26,35 @@ def number_or_none(value):
 
 
 class CallFailure(Exception):
-    def __init__(self, kind, status=None, retry_after=None, detail=None):
+    def __init__(self, kind, status=None, retry_after=None, detail=None, provider_codes=None):
         super().__init__(kind)  # Never echo provider bodies, headers or secrets.
         self.kind = kind
         self.status = status
         self.retry_after = retry_after
         self.detail = detail
+        self.provider_codes = provider_codes
+
+
+def provider_error_codes(error):
+    # Google's error body carries machine-readable codes beside prose. Keep
+    # only the codes: never the message text, which can echo request data.
+    try:
+        envelope = json.loads(error.read().decode('utf-8'))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    detail = envelope.get('error') if isinstance(envelope, dict) else None
+    if not isinstance(detail, dict):
+        return None
+    codes = {}
+    if isinstance(detail.get('status'), str):
+        codes['status'] = detail['status']
+    reasons = []
+    for entry in detail.get('details') or []:
+        if isinstance(entry, dict) and isinstance(entry.get('reason'), str):
+            reasons.append(entry['reason'])
+    if reasons:
+        codes['reasons'] = reasons
+    return codes or None
 
 
 def transport_cause(error):
@@ -111,7 +134,8 @@ class JSONProvider:
                         retry_after = max(0, (date - datetime.now(timezone.utc)).total_seconds())
                     except (ValueError, TypeError, OverflowError):
                         kind = 'http_failure_retry_after_unparseable'
-            raise CallFailure(kind, error.code, retry_after) from None
+            raise CallFailure(kind, error.code, retry_after,
+                              provider_codes=provider_error_codes(error)) from None
         except (OSError, EOFError, http.client.HTTPException) as error:
             cause = transport_cause(error)
             raise CallFailure(transport_kind(cause), detail=transport_detail(cause)) from None
@@ -162,7 +186,10 @@ class JSONProvider:
         if self.provider == 'gemini':
             return {'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
                     'generationConfig': {'maxOutputTokens': self.max_output_tokens,
-                        'responseFormat': {'text': {'mimeType': 'application/json', 'schema': schema}}}}
+                        # Documented wire value is the enum name APPLICATION_JSON,
+                        # not the MIME string (aistudio.google.com generate-content
+                        # reference: responseFormat.text.mimeType string enum).
+                        'responseFormat': {'text': {'mimeType': 'APPLICATION_JSON', 'schema': schema}}}}
         return {'model': self.model, 'input': prompt, 'store': False,
                 'max_output_tokens': self.max_output_tokens,
                 'text': {'format': {'type': 'json_schema', 'name': 'extraction',
