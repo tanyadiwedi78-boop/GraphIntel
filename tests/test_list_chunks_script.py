@@ -161,3 +161,40 @@ def test_module_entry_point_is_not_a_silent_noop_guard(tmp_path):
         text=True,
     )
     assert not job.exists(), "python -m app.extraction.pipeline must not be the documented entry point"
+
+
+def make_exclude_file(tmp_path, ids):
+    path = tmp_path / "exclude.json"
+    data = {}
+    for chunk_id in ids:
+        data[chunk_id] = "already checked"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def test_exclude_ids_keeps_them_out_of_the_sample(tmp_path):
+    data_dir, chunks = make_chunks_folder(tmp_path)
+    excluded = ["chunk-001", "chunk-002", "chunk-003", "chunk-004", "chunk-005"]
+    exclude_path = make_exclude_file(tmp_path, excluded)
+    subset = tmp_path / "data" / "chunks" / "picked.jsonl"
+    result = run_list_chunks(data_dir, [
+        "--sample", "3", "--exclude-ids", str(exclude_path),
+        "--write-subset", str(subset)])
+    assert result.returncode == 0, result.stderr
+    assert "Excluding 5 chunk(s)" in result.stdout
+    picked = printed_sample_ids(result.stdout)
+    assert len(picked) == 3
+    for chunk_id in excluded:
+        assert chunk_id not in picked
+    written = [json.loads(line) for line in subset.read_text(encoding="utf-8").splitlines()]
+    assert len(written) == 3
+    for row in written:
+        assert row["chunk_id"] not in excluded
+
+
+def test_exclude_ids_missing_file_fails(tmp_path):
+    data_dir, chunks = make_chunks_folder(tmp_path)
+    result = run_list_chunks(data_dir, [
+        "--sample", "3", "--exclude-ids", str(tmp_path / "nope.json")])
+    assert result.returncode == 1
+    assert "No exclusion file" in result.stdout

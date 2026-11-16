@@ -10,6 +10,11 @@ real chunk ids already filled in. The pick is deterministic: the same
 chunks.jsonl always gives the same sample.
 
 --show CHUNK_ID prints one chunk's metadata and full text.
+
+--exclude-ids PATH leaves chunks out of the sample: PATH is a JSON file whose
+top-level keys (or list entries) are chunk ids, for example
+tests/fixtures/sample5-chunks.json, so a new sample never repeats chunks that
+were already checked.
 """
 from __future__ import annotations
 
@@ -143,6 +148,8 @@ def main() -> int:
                         help="print one chunk's metadata and full text")
     parser.add_argument("--sample", type=int, default=0, metavar="N",
                         help="pick N varied chunks and print the exact next commands")
+    parser.add_argument("--exclude-ids", default=None, metavar="PATH",
+                        help="JSON file whose keys (or list entries) are chunk ids to leave out")
     parser.add_argument("--write-subset", default=None, metavar="PATH",
                         help="with --sample: write the picked chunks to PATH (must be a new file)")
     args = parser.parse_args()
@@ -166,6 +173,16 @@ def main() -> int:
     if len(chunks) == 0:
         print(f"{chunks_path} has no chunks.")
         return 1
+
+    if args.exclude_ids is not None:
+        excluded_path = Path(args.exclude_ids)
+        if not excluded_path.exists():
+            print(f"No exclusion file at {excluded_path}.")
+            return 1
+        excluded = set(json.loads(excluded_path.read_text(encoding="utf-8")))
+        before = len(chunks)
+        chunks = [chunk for chunk in chunks if str(chunk.get("chunk_id")) not in excluded]
+        print(f"Excluding {before - len(chunks)} chunk(s) listed in {excluded_path}")
 
     if args.sample > 0:
         if args.sample > len(chunks):
