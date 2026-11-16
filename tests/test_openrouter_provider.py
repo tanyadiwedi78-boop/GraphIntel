@@ -110,3 +110,28 @@ def test_openrouter_body_round_trips_through_output_text():
     raw = json.dumps({'choices': [{'message': {'content': '{"ok": true}', 'refusal': None}}]})
     assert provider.output_text(json.loads(raw)) == '{"ok": true}'
     assert json.loads(json.dumps(body))['provider']['require_parameters'] is True
+
+
+def test_common_schema_keeps_strict_mode_shape(ontology):
+    # Strict json_schema endpoints require additionalProperties: false and
+    # every property listed in required on every object. Pin that invariant
+    # so a future schema change fails here, not during a live request.
+    from app.extraction.pipeline import common_schema
+    schema = common_schema(ontology)
+    objects = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get('type') == 'object' or 'properties' in node:
+                objects.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(schema)
+    assert len(objects) >= 2
+    for node in objects:
+        assert node.get('additionalProperties') is False
+        assert set(node.get('properties') or {}) == set(node.get('required') or [])
