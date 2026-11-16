@@ -167,8 +167,44 @@ def request_reservation(chunk, ontology, schema, recipe, pricing):
             'pricing_hash': identity(price)}
 
 
+def check_label_binding(chunks, labels):
+    """Offline preflight: every reviewed label must bind a chunk in this job.
+
+    Runs at prepare time, before any provider call, so a labels/source
+    mismatch never costs a request. Every problem is reported at once, not
+    just the first. Unreviewed labels are counted, not bound.
+    """
+    texts = {}
+    for chunk in chunks:
+        texts[chunk['chunk_id']] = chunk['text']
+    problems = []
+    reviewed = 0
+    unreviewed = 0
+    for chunk_id in sorted(labels):
+        label = labels[chunk_id]
+        if not isinstance(label, dict) or label.get('reviewed') is not True:
+            unreviewed += 1
+            continue
+        reviewed += 1
+        if chunk_id not in texts:
+            problems.append(chunk_id + ': no chunk with this ID in the job')
+            continue
+        source_hash = label.get('source_hash')
+        if not isinstance(source_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', source_hash):
+            problems.append(chunk_id + ': reviewed label has no 64-hex source_hash')
+        elif source_hash != identity(texts[chunk_id]):
+            problems.append(chunk_id + ': source_hash does not match the chunk text')
+    if problems:
+        raise ValueError('labels do not bind the job sources; fix before any run: '
+                         + '; '.join(problems))
+    return {'reviewed': reviewed, 'unreviewed': unreviewed, 'bound': reviewed,
+            'basis': 'Each reviewed label source_hash equals its job chunk text hash; '
+                     'checked offline at prepare time, before any provider call.'}
+
+
 def prepare(job, chunks, ontology, primary_recipe, fallback_recipe=None, policy=None,
-            cost_limits=None, pricing=None, purpose='production', execution_mode='sync'):
+            cost_limits=None, pricing=None, purpose='production', execution_mode='sync',
+            labels=None):
     """Snapshot original sources, retry policy and cost plan. No network."""
     if not chunks or len(chunks) > 1000 or len(json.dumps(chunks).encode()) > 16 * 1024 * 1024:
         raise ValueError('select 1-1000 chunks and at most16MiB per immutable job')
@@ -215,6 +251,8 @@ def prepare(job, chunks, ontology, primary_recipe, fallback_recipe=None, policy=
                 totals[reservation['document_hash']] += money(reservation['usd']) * (1 + policy['retries'])
         for key in documents:
             documents[key].update(maximum_reserved_usd=str(totals[key]), cost_status='Conservative maximum, not actual charge')
+    if labels is not None:
+        plan['label_binding'] = check_label_binding(chunks, labels)
     plan['plan_hash'] = identity(plan)
     job = Path(job)
     job.mkdir(parents=True, exist_ok=True)
@@ -1017,7 +1055,8 @@ def main(argv=None):
                     load(args.labels), policy, limits, pricing, args.execution_mode)
             else:
                 result = prepare(args.job, chunks, ontology, primary.recipe, fallback.recipe if fallback else None,
-                    policy, limits, pricing, execution_mode=args.execution_mode)
+                    policy, limits, pricing, execution_mode=args.execution_mode,
+                    labels=load(args.labels) if args.labels else None)
         elif args.stage == 'compare':
             manifest = load(args.job / 'comparison.json')
             providers = [JSONProvider(r['provider'], r['model'], r['max_output_tokens']) for r in manifest['providers']]
