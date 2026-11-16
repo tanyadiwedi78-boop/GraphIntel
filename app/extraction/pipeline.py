@@ -1026,6 +1026,16 @@ def main(argv=None):
             if args.stage == 'run':
                 if args.rpm is None or args.tpm is None:
                     parser.error('run requires verified local RPM and TPM; other account users and RPD remain external limits')
+                # Validate plain arguments before the key check and the
+                # read-only DNS probe: a bad flag must exit 2 with its own
+                # message whether or not a key is present (a repo .env
+                # counts), never a later guard traceback.
+                if not math.isfinite(args.rpm) or args.rpm <= 0:
+                    parser.error('explicit positive verified local RPM required')
+                if args.tpm <= 0:
+                    parser.error('verified local token-per-minute limit required')
+                if args.max_calls < 0:
+                    parser.error('nonnegative TOTAL job call budget required')
                 # Fail before claiming when credentials are absent.
                 import os
                 if not os.environ.get(primary.key_variable(), '').strip():

@@ -398,3 +398,17 @@ that is an installation issue to inspect, not permission to restore old provider
 Do not commit/Continue/stage the merge until local files and intended deletions are
 reviewed. The verified backup stays untouched. Tests of historical modules now call
 those modules explicitly, not the new two-provider-only entry point; none were skipped.
+
+
+### Validation order in `phase1 run` (Windows test failure fix)
+
+`main()` now validates `--max-calls`, `--rpm` and `--tpm` immediately after the
+present/absent checks and BEFORE the API-key check and the read-only DNS probe.
+Previously a laptop with a real `.env` key passed the key check, so a bad flag
+such as `--max-calls -1` reached the DNS probe first and surfaced as an
+offline-guard traceback (exit 1) instead of the flag's own message (exit 2).
+Linux test environments without `.env` masked the ordering by exiting on the
+missing key first. Regression test
+`test_invalid_run_arguments_rejected_before_key_or_dns` pins the new order with
+a dummy key present. The offline network guard and the test expectations are
+unchanged; only the validation order moved.

@@ -118,3 +118,20 @@ def test_stage_validation_errors_are_clean_exits_not_traces(tmp_path):
                       "--output", str(tmp_path / "run-out.json")])
     assert result.returncode == 2
     assert "Traceback" not in result.stderr
+
+
+def test_invalid_run_arguments_rejected_before_key_or_dns(tmp_path):
+    # With a key present (a laptop .env or a CI env), argument validation must
+    # still win over the key check and the read-only DNS probe: a bad
+    # --max-calls is a clean exit 2, never a guard traceback.
+    chunks = write_chunks(tmp_path, 1)
+    job = tmp_path / "job"
+    run_cli(["prepare", "--job", str(job), "--chunks", str(chunks),
+             "--gemini-model", "m1", "--max-output-tokens", "128",
+             "--output", str(tmp_path / "out.json")])
+    result = run_cli(["run", "--job", str(job), "--max-calls", "-1",
+                      "--rpm", "60", "--tpm", "100000", "--execute-authorized",
+                      "--output", str(tmp_path / "run-out.json")],
+                     {"GEMINI_API_KEY": "dummy-not-real"})
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
