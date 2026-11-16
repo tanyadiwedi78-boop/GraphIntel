@@ -210,10 +210,12 @@ def prepare(job, chunks, ontology, primary_recipe, fallback_recipe=None, policy=
         raise ValueError('select 1-1000 chunks and at most16MiB per immutable job')
     if purpose not in ('production', 'comparison') or execution_mode not in ('sync', 'native_batch'):
         raise ValueError('explicit supported job purpose/mode required')
-    if purpose == 'production' and primary_recipe['provider'] != 'gemini':
-        raise ValueError('production primary is Gemini')
-    if primary_recipe['provider'] not in ('gemini', 'openai'):
-        raise ValueError('only Gemini and OpenAI supported')
+    if purpose == 'production' and primary_recipe['provider'] not in ('gemini', 'openrouter'):
+        raise ValueError('production primary is Gemini, or OpenRouter alone for the new-provider experiment')
+    if primary_recipe['provider'] not in ('gemini', 'openai', 'openrouter'):
+        raise ValueError('only Gemini, OpenAI and OpenRouter supported')
+    if primary_recipe['provider'] == 'openrouter' and execution_mode != 'sync':
+        raise ValueError('OpenRouter supports only sync execution here')
     if fallback_recipe and (purpose == 'comparison' or primary_recipe['provider'] != 'gemini'
                             or fallback_recipe['provider'] != 'openai'):
         raise ValueError('production is Gemini primary/OpenAI fallback; comparison has no fallback')
@@ -969,6 +971,7 @@ def main(argv=None):
     parser.add_argument('--chunks', type=Path)
     parser.add_argument('--gemini-model')
     parser.add_argument('--openai-model')
+    parser.add_argument('--openrouter-model')
     parser.add_argument('--max-output-tokens', type=int)
     parser.add_argument('--max-calls', type=int, default=0, help='TOTAL job attempts, includes failures and fallback, not a dollar cap')
     parser.add_argument('--rpm', type=float)
@@ -1032,8 +1035,12 @@ def main(argv=None):
             with GraphDatabase.driver(args.neo4j_uri, auth=(os.environ['NEO4J_USERNAME'], os.environ['NEO4J_PASSWORD'])) as driver:
                 result = read_registry(driver, args.database, identity([args.neo4j_uri, args.database]))
         elif args.stage in ('prepare', 'compare-prepare'):
-            if not args.chunks or not args.gemini_model or not args.max_output_tokens:
-                parser.error('prepare requires chunks, explicit Gemini model and output-token limit')
+            if not args.chunks or not args.max_output_tokens or not (args.gemini_model or args.openrouter_model):
+                parser.error('prepare requires chunks, an explicit Gemini or OpenRouter model and output-token limit')
+            if args.gemini_model and args.openrouter_model:
+                parser.error('choose one primary: --gemini-model or --openrouter-model')
+            if args.openrouter_model and (args.openai_model or args.stage == 'compare-prepare'):
+                parser.error('the OpenRouter experiment runs alone: no fallback, no paired comparison')
             if not args.chunks.is_file():
                 parser.error('chunks file not found: ' + str(args.chunks) + '; run scripts/build_chunks.py first')
             if args.chunks.stat().st_size > 16 * 1024 * 1024:
@@ -1043,7 +1050,10 @@ def main(argv=None):
                 for line in handle:
                     if line.strip():
                         chunks.append(json.loads(line))
-            primary = JSONProvider('gemini', args.gemini_model, args.max_output_tokens)
+            if args.gemini_model:
+                primary = JSONProvider('gemini', args.gemini_model, args.max_output_tokens)
+            else:
+                primary = JSONProvider('openrouter', args.openrouter_model, args.max_output_tokens)
             fallback = JSONProvider('openai', args.openai_model, args.max_output_tokens) if args.openai_model else None
             policy = retry_policy(args.retries)
             pricing = load(args.pricing) if args.pricing else None

@@ -88,7 +88,9 @@ def transport_detail(cause):
 
 class JSONProvider:
     def __init__(self, provider, model, max_output_tokens, timeout=120, opener=None):
-        if provider not in ('gemini', 'openai') or not re.fullmatch(r'[A-Za-z0-9._-]+', model):
+        # OpenRouter model ids look like "vendor/name:free", so they keep / and :.
+        pattern = r'[A-Za-z0-9._/:~-]+' if provider == 'openrouter' else r'[A-Za-z0-9._-]+'
+        if provider not in ('gemini', 'openai', 'openrouter') or not re.fullmatch(pattern, model):
             raise ValueError('explicit provider and model required')
         if type(max_output_tokens) is not int or max_output_tokens <= 0 or timeout <= 0:
             raise ValueError('positive output limit and timeout required')
@@ -102,8 +104,7 @@ class JSONProvider:
                        'execution_mode': 'live_transport'}
 
     def ready(self):
-        variable = 'GEMINI_API_KEY' if self.provider == 'gemini' else 'OPENAI_API_KEY'
-        if not os.environ.get(variable, '').strip():
+        if not os.environ.get(self.key_variable(), '').strip():
             raise ValueError('provider key missing; no request sent')
 
     def call(self, prompt, schema):
@@ -171,13 +172,20 @@ class JSONProvider:
         return None
 
     def key_variable(self):
-        return 'GEMINI_API_KEY' if self.provider == 'gemini' else 'OPENAI_API_KEY'
+        if self.provider == 'gemini':
+            return 'GEMINI_API_KEY'
+        if self.provider == 'openrouter':
+            return 'OPENROUTER_API_KEY'
+        return 'OPENAI_API_KEY'
 
     def endpoint(self):
         key = os.environ.get(self.key_variable(), '').strip()
         if self.provider == 'gemini':
             return ('https://generativelanguage.googleapis.com/v1beta/models/' + self.model + ':generateContent',
                     {'x-goog-api-key': key})
+        if self.provider == 'openrouter':
+            return ('https://openrouter.ai/api/v1/chat/completions',
+                    {'Authorization': 'Bearer ' + key})
         return 'https://api.openai.com/v1/responses', {'Authorization': 'Bearer ' + key}
 
     def body(self, prompt, schema):
@@ -190,6 +198,15 @@ class JSONProvider:
                         # not the MIME string (aistudio.google.com generate-content
                         # reference: responseFormat.text.mimeType string enum).
                         'responseFormat': {'text': {'mimeType': 'APPLICATION_JSON', 'schema': schema}}}}
+        if self.provider == 'openrouter':
+            return {'model': self.model,
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'max_tokens': self.max_output_tokens,
+                    'response_format': {'type': 'json_schema',
+                                        'json_schema': {'name': 'extraction', 'strict': True,
+                                                        'schema': schema}},
+                    # Route only to endpoints that can enforce the schema.
+                    'provider': {'require_parameters': True}}
         return {'model': self.model, 'input': prompt, 'store': False,
                 'max_output_tokens': self.max_output_tokens,
                 'text': {'format': {'type': 'json_schema', 'name': 'extraction',
@@ -215,6 +232,16 @@ class JSONProvider:
                     for part in step.get('content', []):
                         if part.get('type') == 'text':
                             texts.append(part['text'])
+        elif self.provider == 'openrouter':
+            choices = data.get('choices')
+            if not isinstance(choices, list) or len(choices) != 1:
+                raise ValueError('incomplete or refused')
+            message = choices[0].get('message') or {}
+            if message.get('refusal'):
+                raise ValueError('refused')
+            if not isinstance(message.get('content'), str):
+                raise ValueError('exactly one structured output required')
+            texts.append(message['content'])
         else:
             if data.get('status') != 'completed':
                 raise ValueError('incomplete or refused')
@@ -231,6 +258,8 @@ class JSONProvider:
 
     def api(self, path, body=None, multipart=None):
         """One batch control request. No retries, redirects or unsafe URL input."""
+        if self.provider == 'openrouter':
+            raise ValueError('native batch is not wired for openrouter; prepare a sync job')
         self.ready()
         base = ('https://generativelanguage.googleapis.com/v1beta/' if self.provider == 'gemini'
                 else 'https://api.openai.com/v1/')
