@@ -412,3 +412,20 @@ missing key first. Regression test
 `test_invalid_run_arguments_rejected_before_key_or_dns` pins the new order with
 a dummy key present. The offline network guard and the test expectations are
 unchanged; only the validation order moved.
+
+
+### Cautionary-evidence hold for relationships (pipeline-wide)
+
+Extraction validation now holds any relationship whose ONLY evidence quote is
+cautionary boilerplate (forward-looking-statements / safe-harbor language) and
+routes it to review instead of mechanical acceptance. This is the pipeline-wide
+guard for the failure seen in the sample 10-Q chunk, where a FACES edge cited
+only the forward-looking disclaimer. MENTIONS is exempt because boilerplate
+naming a product is still a mention. Entities are never held; the v3 prompt
+rule already restricts FACES edges at generation time, and this guard is the
+independent validation-layer net for when a model ignores the prompt. A hold is
+a lexical property of the quoted sentence, not a factual-accuracy verdict:
+nothing is deleted (raw_text keeps every edge, held_relationships keeps the
+held ones), and offline tests prove guard behavior only, never that every live
+extraction is semantically correct. Verified against the real sample record:
+both entities stay accepted, the unsupported FACES edge is held.

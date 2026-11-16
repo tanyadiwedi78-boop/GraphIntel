@@ -13,6 +13,21 @@ def squash_spaces(text):
     return ' '.join(text.split())
 
 
+# Lexical markers of cautionary / safe-harbor boilerplate. Detection is a
+# property of the quoted sentence, never a verdict on meaning: a substantive
+# statement elsewhere in the chunk is unaffected because every edge carries
+# its own evidence quote.
+CAUTIONARY_MARKERS = ('forward-looking statement',
+                      'private securities litigation reform act',
+                      'safe harbor', 'safe-harbor')
+
+
+def cautionary_evidence(text):
+    """True when the evidence quote itself is cautionary boilerplate."""
+    squashed = squash_spaces(text).casefold()
+    return any(marker in squashed for marker in CAUTIONARY_MARKERS)
+
+
 CONTRACT_VERSION = 'extraction-contract-v3-frozen-types'
 NonemptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Confidence = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
@@ -51,6 +66,13 @@ def check_source_contract(payload, chunk, ontology):
     Semantic support of entity identity, alias equivalence, descriptions,
     confidence and relationship direction still needs independent source review.
     No alias is globally merged here, no graph writes occur, and no repair runs.
+
+    A relationship whose ONLY evidence is cautionary boilerplate (for example a
+    forward-looking-statements disclaimer naming a risk as an example) cannot
+    establish a substantive claim, so it is reported in cautionary_holds for
+    review instead of mechanical acceptance. MENTIONS is exempt: boilerplate
+    naming a product is still a mention. A hold is not a factual-accuracy
+    verdict and never deletes data; the raw response keeps every edge.
     """
     if not isinstance(payload, ExtractionPayload):
         raise TypeError('payload must pass the common Pydantic contract first')
@@ -70,7 +92,8 @@ def check_source_contract(payload, chunk, ontology):
             problems.append('entity evidence is absent from the original chunk')
         if len(entity.aliases) != len(set(entity.aliases)):
             problems.append('duplicate aliases in one entity')
-    for edge in payload.relationships:
+    holds = []
+    for position, edge in enumerate(payload.relationships):
         if edge.source_chunk_id != chunk_id:
             problems.append('relationship has the wrong source chunk ID')
         if squash_spaces(edge.evidence) not in source:
@@ -79,8 +102,14 @@ def check_source_contract(payload, chunk, ontology):
             problems.append('relationship endpoint is absent from extracted entities')
         elif not ontology.allows(edge.relationship_type, names[edge.source_entity], names[edge.target_entity]):
             problems.append('relationship direction or type is outside the fixed ontology')
+        if edge.relationship_type != 'MENTIONS' and cautionary_evidence(edge.evidence):
+            holds.append({'position': position, 'source_entity': edge.source_entity,
+                          'target_entity': edge.target_entity,
+                          'relationship_type': edge.relationship_type,
+                          'reason': 'evidence is cautionary boilerplate only; substantive support not established'})
     return {'contract_version': CONTRACT_VERSION, 'mechanical_checks_pass': not problems,
-            'problems': problems, 'semantic_evidence_status': 'Not reviewed',
+            'problems': problems, 'cautionary_holds': holds,
+            'semantic_evidence_status': 'Not reviewed',
             'global_entity_resolution_status': 'Not performed',
             'graph_write_permitted': False}
 

@@ -93,3 +93,98 @@ def test_real_quote_with_false_description_does_not_become_reviewed(payload_data
     assert result['mechanical_checks_pass']
     assert result['semantic_evidence_status'] == 'Not reviewed'
     assert not result['graph_write_permitted']
+
+
+CAUTIONARY_TEXT = ('Each of the terms the "Company" and "Apple" as used herein refers '
+    'collectively to Apple Inc. For example, statements in this Form 10-Q regarding the '
+    'potential future impact of the COVID-19 pandemic on the Company business and results '
+    'of operations are forward-looking statements. The COVID-19 pandemic has materially '
+    'disrupted the Company supply chain and retail operations. The forward-looking '
+    'statements in this report also name the iPhone 13.')
+
+CAUTIONARY_QUOTE = ('statements in this Form 10-Q regarding the potential future impact of '
+    'the COVID-19 pandemic on the Company business and results of operations are '
+    'forward-looking statements')
+SUBSTANTIVE_QUOTE = ('The COVID-19 pandemic has materially disrupted the Company supply '
+    'chain and retail operations')
+
+
+def cautionary_chunk():
+    return {'chunk_id': 'c1', 'text': CAUTIONARY_TEXT}
+
+
+def apple_covid_payload(edge_evidence, relationship_type='FACES'):
+    return {'entities': [
+        {'canonical_name': 'Apple', 'entity_type': 'Company', 'aliases': [],
+         'description': 'The registrant.', 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': 'Each of the terms the "Company" and "Apple" as used herein refers collectively to Apple Inc.'},
+        {'canonical_name': 'COVID-19 pandemic', 'entity_type': 'Risk', 'aliases': [],
+         'description': 'A named risk.', 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': CAUTIONARY_QUOTE}],
+        'relationships': [{'source_entity': 'Apple', 'target_entity': 'COVID-19 pandemic',
+         'relationship_type': relationship_type, 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': edge_evidence}]}
+
+
+def test_cautionary_only_evidence_holds_faces_edge(ontology):
+    result = check_source_contract(ExtractionPayload.model_validate(
+        apple_covid_payload(CAUTIONARY_QUOTE)), cautionary_chunk(), ontology)
+    assert result['mechanical_checks_pass'] is True
+    assert result['problems'] == []
+    assert len(result['cautionary_holds']) == 1
+    assert result['cautionary_holds'][0]['relationship_type'] == 'FACES'
+
+
+def test_substantive_risk_statement_edge_not_held(ontology):
+    result = check_source_contract(ExtractionPayload.model_validate(
+        apple_covid_payload(SUBSTANTIVE_QUOTE)), cautionary_chunk(), ontology)
+    assert result['cautionary_holds'] == []
+    assert result['mechanical_checks_pass'] is True
+
+
+def test_mentions_edge_exempt_from_cautionary_hold(ontology):
+    data = {'entities': [
+        {'canonical_name': 'Apple', 'entity_type': 'Company', 'aliases': [],
+         'description': 'The registrant.', 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': 'Each of the terms the "Company" and "Apple" as used herein refers collectively to Apple Inc.'},
+        {'canonical_name': 'iPhone 13', 'entity_type': 'Product', 'aliases': [],
+         'description': 'A named product.', 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': 'The forward-looking statements in this report also name the iPhone 13.'}],
+        'relationships': [{'source_entity': 'Apple', 'target_entity': 'iPhone 13',
+         'relationship_type': 'MENTIONS', 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': 'The forward-looking statements in this report also name the iPhone 13.'}]}
+    result = check_source_contract(ExtractionPayload.model_validate(data),
+                                   cautionary_chunk(), ontology)
+    assert result['cautionary_holds'] == []
+    assert result['mechanical_checks_pass'] is True
+
+
+def test_entities_never_held_for_cautionary_evidence(ontology):
+    data = apple_covid_payload(SUBSTANTIVE_QUOTE)
+    data['relationships'] = []
+    result = check_source_contract(ExtractionPayload.model_validate(data),
+                                   cautionary_chunk(), ontology)
+    # The COVID entity cites the cautionary sentence; entities are unaffected.
+    assert result['cautionary_holds'] == []
+    assert result['mechanical_checks_pass'] is True
+
+
+def test_validated_record_quarantines_held_edges_but_keeps_everything(ontology):
+    from app.extraction.pipeline import validated_record
+    data = apple_covid_payload(CAUTIONARY_QUOTE)
+    data['entities'].append(
+        {'canonical_name': 'iPhone 13', 'entity_type': 'Product', 'aliases': [],
+         'description': 'A named product.', 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': 'The forward-looking statements in this report also name the iPhone 13.'})
+    data['relationships'].append(
+        {'source_entity': 'Apple', 'target_entity': 'iPhone 13',
+         'relationship_type': 'MENTIONS', 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': 'The forward-looking statements in this report also name the iPhone 13.'})
+    import json
+    record = validated_record(json.dumps(data), cautionary_chunk(), ontology)
+    assert record['accepted'] is True
+    assert len(record['entities']) == 3
+    assert [edge['relationship_type'] for edge in record['relationships']] == ['MENTIONS']
+    assert [edge['relationship_type'] for edge in record['held_relationships']] == ['FACES']
+    assert 'FACES' in record['raw_text']
+    assert record['semantic_evidence_status'] == 'Not reviewed'

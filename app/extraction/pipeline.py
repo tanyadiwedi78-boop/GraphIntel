@@ -235,7 +235,17 @@ def validated_record(raw, chunk, ontology):
     record.update(checks)
     record['schema_pass'] = True
     if checks['mechanical_checks_pass']:
-        record.update(accepted=True, **payload.model_dump())
+        accepted_payload = payload.model_dump()
+        held_positions = {hold['position'] for hold in checks['cautionary_holds']}
+        if held_positions:
+            held = []
+            kept = []
+            for position, edge in enumerate(accepted_payload['relationships']):
+                (held if position in held_positions else kept).append(edge)
+            accepted_payload['relationships'] = kept
+            # Held edges stay visible for review; raw_text keeps everything.
+            record['held_relationships'] = held
+        record.update(accepted=True, **accepted_payload)
     return record
 
 
