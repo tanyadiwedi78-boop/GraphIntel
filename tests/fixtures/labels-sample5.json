@@ -1,0 +1,107 @@
+{
+ "000032019322000006-5cfde315922322eb-04e605fe-document-000": {
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-16",
+  "user_confirmed": false,
+  "source_hash": "537ff9e1ee1f2dc172ddb63e960904ae22704b0f2d2d0b22d66ecf3227d862b4",
+  "entities": [
+   {
+    "canonical_name": "Apple Inc.",
+    "entity_type": "Company"
+   }
+  ],
+  "relationships": [],
+  "name_groups": [
+   [
+    "Apple Inc.",
+    "Apple"
+   ]
+  ]
+ },
+ "000032019322000058-05ba6e0248b2dfc8-04e605fe-document-000": {
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-16",
+  "user_confirmed": false,
+  "source_hash": "a44c86facf3990ecbc4aa930d5a109a7c595576d58b94300423b2da84048510c",
+  "entities": [
+   {
+    "canonical_name": "Apple Inc.",
+    "entity_type": "Company"
+   }
+  ],
+  "relationships": [],
+  "name_groups": [
+   [
+    "Apple Inc.",
+    "Apple"
+   ]
+  ]
+ },
+ "000032019322000069-0e095b65e6dbeb0f-04e605fe-document-000": {
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-16",
+  "user_confirmed": false,
+  "source_hash": "450cbe8d649556a7cb111c1d4a723484afd43a9791d752025315531c41a19a3c",
+  "entities": [
+   {
+    "canonical_name": "Apple Inc.",
+    "entity_type": "Company"
+   }
+  ],
+  "relationships": [],
+  "name_groups": [
+   [
+    "Apple Inc.",
+    "Apple"
+   ]
+  ]
+ },
+ "000032019322000007-6a7c20be2f5df050-04e605fe-document-015": {
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-16",
+  "user_confirmed": false,
+  "source_hash": "149662071ae76fba8d567089f03d176e8a115e3fc02a25f3ed4b911c385753bb",
+  "entities": [
+   {
+    "canonical_name": "Apple Inc.",
+    "entity_type": "Company"
+   },
+   {
+    "canonical_name": "COVID-19 pandemic",
+    "entity_type": "Risk"
+   }
+  ],
+  "relationships": [],
+  "name_groups": [
+   [
+    "Apple Inc.",
+    "Apple",
+    "Company"
+   ]
+  ]
+ },
+ "000032019322000059-b4de7f98ebaba76d-04e605fe-document-015": {
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-16",
+  "user_confirmed": false,
+  "source_hash": "c92d032193e07d284017ff52b7be85409cec9926c24371e5358b81cae8519db8",
+  "entities": [
+   {
+    "canonical_name": "Apple Inc.",
+    "entity_type": "Company"
+   },
+   {
+    "canonical_name": "COVID-19 pandemic",
+    "entity_type": "Risk"
+   }
+  ],
+  "relationships": [],
+  "name_groups": [
+   [
+    "Apple Inc.",
+    "Apple",
+    "Company"
+   ]
+  ]
+ }
+}

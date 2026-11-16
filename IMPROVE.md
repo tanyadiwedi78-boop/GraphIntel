@@ -429,3 +429,24 @@ nothing is deleted (raw_text keeps every edge, held_relationships keeps the
 held ones), and offline tests prove guard behavior only, never that every live
 extraction is semantically correct. Verified against the real sample record:
 both entities stay accepted, the unsupported FACES edge is held.
+
+
+### Funnel layer 3 made durable: real sample5 regression fixtures + answer key
+
+The three-layer funnel now has its regression gate on REAL data, committed:
+- tests/fixtures/sample5-chunks.json: the five sample chunk texts (SEC excerpts
+  recovered from the user's own job records; chunk 059 hash-anchored against
+  her saved record, the others bound by report word counts and structural
+  diffs against the anchored chunks).
+- tests/fixtures/labels-sample5.json: the source-derived answer key for those
+  five chunks, with explicit reviewer provenance (instinct-agent source review
+  2026-11-16, user_confirmed false). reviewed:true reflects that documented
+  source review; her confirmation or correction updates user_confirmed.
+  Usable directly: phase1 report --labels tests\fixtures\labels-sample5.json.
+- tests/fixtures/sample5-v2-output-059.json: the real v2 raw output for chunk
+  059. The regression test proves the guard now holds its FACES edge while
+  keeping both entities and the raw response.
+- tests/test_sample5_funnel_regression.py: 4 offline tests over this real
+  data. They prove guard and scorer behavior only, never live model quality.
+Known limit: all five chunks have zero true relationships, so this gate
+measures wrong-edge removal and entity correctness, not good-edge survival.
