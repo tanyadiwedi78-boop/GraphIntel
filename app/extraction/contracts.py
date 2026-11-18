@@ -28,6 +28,19 @@ def cautionary_evidence(text):
     return any(marker in squashed for marker in CAUTIONARY_MARKERS)
 
 
+def name_in_source(candidate_names, lowered_source):
+    """True when any candidate name literally appears in the chunk text.
+
+    The chunk text is squashed and case-folded once by the caller. A name is
+    grounding evidence, not proof of a fact: two present names do not prove
+    the relationship between them.
+    """
+    for name in candidate_names:
+        if squash_spaces(name).casefold() in lowered_source:
+            return True
+    return False
+
+
 CONTRACT_VERSION = 'extraction-contract-v3-frozen-types'
 NonemptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Confidence = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
@@ -73,6 +86,12 @@ def check_source_contract(payload, chunk, ontology):
     review instead of mechanical acceptance. MENTIONS is exempt: boilerplate
     naming a product is still a mention. A hold is not a factual-accuracy
     verdict and never deletes data; the raw response keeps every edge.
+
+    A relationship whose endpoint name (or any of its aliases) never literally
+    appears in the chunk is reported in grounding_holds for review the same
+    way: the name may be invented, or only normalized differently, so the edge
+    is held, never dropped. Entities themselves are never held or removed;
+    ungrounded names are listed in ungrounded_entity_names for review.
     """
     if not isinstance(payload, ExtractionPayload):
         raise TypeError('payload must pass the common Pydantic contract first')
@@ -92,7 +111,19 @@ def check_source_contract(payload, chunk, ontology):
             problems.append('entity evidence is absent from the original chunk')
         if len(entity.aliases) != len(set(entity.aliases)):
             problems.append('duplicate aliases in one entity')
+    lowered = source.casefold()
+    grounded = {}
+    for entity in payload.entities:
+        candidates = [entity.canonical_name]
+        for alias in entity.aliases:
+            candidates.append(alias)
+        grounded[entity.canonical_name] = name_in_source(candidates, lowered)
+    ungrounded_names = []
+    for entity_name, found in grounded.items():
+        if not found:
+            ungrounded_names.append(entity_name)
     holds = []
+    grounding_holds = []
     for position, edge in enumerate(payload.relationships):
         if edge.source_chunk_id != chunk_id:
             problems.append('relationship has the wrong source chunk ID')
@@ -107,8 +138,16 @@ def check_source_contract(payload, chunk, ontology):
                           'target_entity': edge.target_entity,
                           'relationship_type': edge.relationship_type,
                           'reason': 'evidence is cautionary boilerplate only; substantive support not established'})
+        if edge.source_entity in grounded and edge.target_entity in grounded:
+            if not grounded[edge.source_entity] or not grounded[edge.target_entity]:
+                grounding_holds.append({'position': position, 'source_entity': edge.source_entity,
+                                        'target_entity': edge.target_entity,
+                                        'relationship_type': edge.relationship_type,
+                                        'reason': 'endpoint name absent from the source chunk; grounding not established'})
     return {'contract_version': CONTRACT_VERSION, 'mechanical_checks_pass': not problems,
             'problems': problems, 'cautionary_holds': holds,
+            'grounding_holds': grounding_holds,
+            'ungrounded_entity_names': sorted(ungrounded_names),
             'semantic_evidence_status': 'Not reviewed',
             'global_entity_resolution_status': 'Not performed',
             'graph_write_permitted': False}

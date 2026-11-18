@@ -188,3 +188,56 @@ def test_validated_record_quarantines_held_edges_but_keeps_everything(ontology):
     assert [edge['relationship_type'] for edge in record['held_relationships']] == ['FACES']
     assert 'FACES' in record['raw_text']
     assert record['semantic_evidence_status'] == 'Not reviewed'
+
+
+def ungrounded_payload(relationship_type='DEVELOPS'):
+    return {'entities': [
+        {'canonical_name': 'Apple', 'entity_type': 'Company', 'aliases': [],
+         'description': 'The registrant.', 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': 'Each of the terms the "Company" and "Apple" as used herein refers collectively to Apple Inc.'},
+        {'canonical_name': 'Widget Pro', 'entity_type': 'Technology', 'aliases': [],
+         'description': 'An invented name.', 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': SUBSTANTIVE_QUOTE}],
+        'relationships': [{'source_entity': 'Apple', 'target_entity': 'Widget Pro',
+         'relationship_type': relationship_type, 'source_chunk_id': 'c1', 'confidence': 0.9,
+         'evidence': SUBSTANTIVE_QUOTE}]}
+
+
+def test_absent_endpoint_name_holds_edge_and_lists_ungrounded(ontology):
+    result = check_source_contract(ExtractionPayload.model_validate(ungrounded_payload()),
+                                   cautionary_chunk(), ontology)
+    assert result['mechanical_checks_pass'] is True
+    assert result['cautionary_holds'] == []
+    assert len(result['grounding_holds']) == 1
+    assert result['grounding_holds'][0]['target_entity'] == 'Widget Pro'
+    assert result['ungrounded_entity_names'] == ['Widget Pro']
+
+
+def test_alias_grounding_avoids_hold(ontology):
+    data = ungrounded_payload()
+    data['entities'][1]['aliases'] = ['iPhone 13']
+    result = check_source_contract(ExtractionPayload.model_validate(data),
+                                   cautionary_chunk(), ontology)
+    assert result['grounding_holds'] == []
+    assert result['ungrounded_entity_names'] == []
+
+
+def test_name_grounding_is_case_insensitive(ontology):
+    data = ungrounded_payload()
+    data['entities'][1]['canonical_name'] = 'iphone 13'
+    data['relationships'][0]['target_entity'] = 'iphone 13'
+    result = check_source_contract(ExtractionPayload.model_validate(data),
+                                   cautionary_chunk(), ontology)
+    assert result['grounding_holds'] == []
+    assert result['mechanical_checks_pass'] is True
+
+
+def test_grounding_hold_keeps_entities_and_raw_text(ontology):
+    import json
+    from app.extraction.pipeline import validated_record
+    record = validated_record(json.dumps(ungrounded_payload()), cautionary_chunk(), ontology)
+    assert record['accepted'] is True
+    assert len(record['entities']) == 2
+    assert record['relationships'] == []
+    assert [edge['target_entity'] for edge in record['held_relationships']] == ['Widget Pro']
+    assert 'Widget Pro' in record['raw_text']

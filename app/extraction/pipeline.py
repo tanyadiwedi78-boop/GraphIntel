@@ -277,6 +277,8 @@ def validated_record(raw, chunk, ontology):
     if checks['mechanical_checks_pass']:
         accepted_payload = payload.model_dump()
         held_positions = {hold['position'] for hold in checks['cautionary_holds']}
+        for hold in checks['grounding_holds']:
+            held_positions.add(hold['position'])
         if held_positions:
             held = []
             kept = []

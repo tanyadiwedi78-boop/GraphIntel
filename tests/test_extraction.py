@@ -24,7 +24,9 @@ def make_chunk(number):
 def good_payload(quote=QUOTE, chunk_id="chunk-1"):
     return json.dumps({
         "entities": [
-            {"canonical_name": "Acme Corp", "entity_type": "Company", "aliases": [],
+            # The alias keeps the normalized name grounded in the chunk text
+            # ("Acme"), so the grounding hold does not quarantine the edge.
+            {"canonical_name": "Acme Corp", "entity_type": "Company", "aliases": ["Acme"],
              "description": "A company.", "source_chunk_id": chunk_id,
              "confidence": 0.9, "evidence": quote},
             {"canonical_name": "Widget Engine", "entity_type": "Technology", "aliases": [],
