@@ -1,0 +1,15 @@
+{
+ "openrouter": {
+  "model": "inclusionai/ling-3.2-flash:free",
+  "verified": true,
+  "source": "https://openrouter.ai/api/v1/models",
+  "account_reference": "OpenRouter :free variant: prompt and completion price 0 USD for every account on the live listing 2026-11-18, so this model cannot bill; per-account daily free-request allowance is separate and unverified until the first run",
+  "currency": "USD",
+  "checked_at": "2026-11-18T16:29:12.032124+00:00",
+  "max_input_tokens": 1048576,
+  "max_output_tokens": 262144,
+  "input_per_million_usd": "0",
+  "output_per_million_usd": "0",
+  "free_tier_no_billing_verified": true
+ }
+}
