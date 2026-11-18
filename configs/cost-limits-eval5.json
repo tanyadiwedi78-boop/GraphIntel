@@ -1,5 +1,5 @@
 {
- "authority_reference": "user whatsapp 2026-11-18 08:04: execute 5-10 chunks and show eval results, free tier only; user whatsapp 2026-11-18 13:09: okk after OpenRouter + serving-provider public-data disclosure",
+ "authority_reference": "user whatsapp 2026-11-18 08:04: execute 5-10 chunks and show eval results, free tier only; user whatsapp 2026-11-18 13:08-13:09: OpenRouter route chosen (\"Using groq key or openrouter\", then \"Okk\"); public-data disclosure (OpenRouter plus serving provider) delivered to user 2026-11-18 13:09:46; exact model confirmation pending before the live run",
  "total_usd": "0",
  "documents": {
   "05ba6e0248b2dfc8d1424740a5ce55d55f7cbddbafcdc3bcd8dd00b52f4a2c55": "0",
