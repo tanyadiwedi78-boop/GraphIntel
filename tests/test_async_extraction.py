@@ -374,3 +374,13 @@ def test_secondary_dashboard_failure_does_not_hide_original_error(tmp_path, onto
     with pytest.raises(RuntimeError, match='original extraction failure'):
         execute(instance)
     assert not (instance.pipeline.job / 'run-lock.json').exists()
+
+
+def test_provider_metrics_are_operational_not_matched_quality(tmp_path, ontology, chunk, payload_data):
+    instance = runner(tmp_path, ontology, chunk, ['{}'], [json.dumps(payload_data)])
+    execute(instance)
+    summary = json.loads((instance.telemetry.folder / 'summary.json').read_text())
+    assert summary['providers']['gemini']['attempts'] == 1
+    assert summary['providers']['gemini']['schema_valid'] == 0
+    assert summary['providers']['openrouter']['accepted'] == 1
+    assert 'not a matched' in summary['comparison_warning']

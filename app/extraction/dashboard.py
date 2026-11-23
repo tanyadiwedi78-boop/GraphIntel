@@ -118,6 +118,29 @@ def metric_cards(summary: dict) -> str:
     return "".join(metrics)
 
 
+def provider_cards(summary: dict) -> str:
+    cards = []
+    for name, row in summary.get("providers", {}).items():
+        cards.append(
+            "<section><h3>"
+            + display(name)
+            + "</h3><p>Finished attempts: "
+            + display(row["attempts"])
+            + "; accepted: "
+            + display(row["accepted"])
+            + "; schema-valid: "
+            + display(row["schema_valid"])
+            + "/"
+            + display(row["attempts"])
+            + "</p><p>Mean request seconds: "
+            + display(row["mean_seconds"])
+            + "; timing samples: "
+            + display(row["duration_count"])
+            + "</p></section>"
+        )
+    return "".join(cards)
+
+
 def dashboard_html(summary: dict, events: List[dict], quality: dict) -> str:
     data_kind = summary.get("data_kind", "unknown")
     notice = (
@@ -165,7 +188,9 @@ Precision and recall need source-checked reference labels.</p><pre>"""
         + """
 <h2>Attempts and fallback</h2><p>Latest 100 rows shown in each detailed section; JSON and JSONL files retain full run evidence.</p><p>"""
         + html.escape(summary["comparison_warning"])
-        + "</p><section class='scroll'><table class='attempts'>"
+        + "</p>"
+        + provider_cards(summary)
+        + "<section class='scroll'><table class='attempts'>"
         + """
 <thead><tr><th>Chunk</th><th>Provider</th><th>Model</th><th>Stage</th><th>Accepted</th><th>Category</th><th>Reason</th><th>Seconds</th><th>Tokens</th></tr></thead>
 <tbody>"""

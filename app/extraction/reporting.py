@@ -41,6 +41,36 @@ def token_counts(usage: Any) -> dict:
     return result
 
 
+def provider_metrics(attempts: List[dict]) -> dict:
+    grouped = {}
+    for attempt in attempts:
+        name = attempt["provider"]
+        if name not in grouped:
+            grouped[name] = {
+                "attempts": 0,
+                "schema_valid": 0,
+                "accepted": 0,
+                "duration_total": 0.0,
+                "duration_count": 0,
+            }
+        row = grouped[name]
+        row["attempts"] += 1
+        row["schema_valid"] += int(attempt.get("schema_pass") is True)
+        row["accepted"] += int(attempt.get("accepted") is True)
+        seconds = attempt.get("request_seconds")
+        if type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0:
+            row["duration_total"] += seconds
+            row["duration_count"] += 1
+    for row in grouped.values():
+        row["mean_seconds"] = (
+            row["duration_total"] / row["duration_count"]
+            if row["duration_count"]
+            else None
+        )
+        row["schema_validity"] = row["schema_valid"] / row["attempts"]
+    return grouped
+
+
 def operational_report(events: List[dict]) -> Dict[str, Any]:
     attempts = []
     cache_hits = 0
@@ -83,6 +113,7 @@ def operational_report(events: List[dict]) -> Dict[str, Any]:
                 tokens[name] += value
     ordered = sorted(latencies)
     return {
+        "providers": provider_metrics(attempts),
         "basis": "This run only. All finished attempts include failures; cache/checkpoint skips excluded.",
         "comparison_warning": "Fallback sees selected failures, not a matched provider comparison.",
         "attempts_started": started,
