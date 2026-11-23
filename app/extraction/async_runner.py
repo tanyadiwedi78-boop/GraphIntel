@@ -306,6 +306,58 @@ class AsyncRunner:
         finally:
             self.telemetry.end_span(chunk_span, status)
 
+    async def provider_attempts(
+        self,
+        provider: Any,
+        stage: str,
+        chunk: dict,
+        prior: list,
+        max_calls: int,
+        limits: Dict[str, dict],
+        chunk_span_id: str,
+        started: float,
+    ) -> bool:
+        previous_count = 0
+        for attempt in prior:
+            if attempt["provider"] == provider.recipe["provider"]:
+                previous_count += 1
+        retry_count = 1 + self.pipeline.plan["retry_policy"]["retries"]
+        for index in range(previous_count, retry_count):
+            if self.used >= max_calls:
+                self.stopped = True
+                self.emit("run_stopped", reason="Total job call budget reached.")
+                return False
+            if stage == "fallback" and index == 0:
+                self.emit(
+                    "fallback_switched",
+                    chunk_id=chunk["chunk_id"],
+                    reason="Eligible primary attempts exhausted.",
+                )
+            if not await self.retry_wait(prior, index):
+                return False
+            result, _record, failure = await self.call(
+                provider, chunk, chunk_span_id, stage, limits
+            )
+            prior.append(result)
+            if failure is None:
+                self.pipeline.checkpoint(
+                    chunk, result, chunk_wall_seconds=time.monotonic() - started
+                )
+                self.emit(
+                    "chunk_accepted",
+                    chunk_id=chunk["chunk_id"],
+                    provider=provider.recipe["provider"],
+                )
+                return True
+            if failure.systemic or not failure.retryable:
+                self.dead_letter(chunk, failure)
+                self.stopped = True
+                self.emit(
+                    "run_stopped", category=failure.category, reason=failure.reason
+                )
+                return False
+        return False
+
     async def extract_attempts(
         self,
         chunk: dict,
@@ -319,70 +371,32 @@ class AsyncRunner:
         providers = [(self.pipeline.primary, "primary")]
         if self.pipeline.fallback and fallback_authorized:
             providers.append((self.pipeline.fallback, "fallback"))
-        failure = (
-            classify_failure(
-                prior[-1],
+        for provider, stage in providers:
+            accepted = await self.provider_attempts(
+                provider, stage, chunk, prior, max_calls, limits, chunk_span_id, started
+            )
+            if accepted:
+                return True
+            if self.stopped:
+                return False
+        if prior:
+            last_result = prior[-1]
+            failure = classify_failure(
+                last_result,
                 validated_record(
-                    prior[-1].get("raw_text"), chunk, self.pipeline.ontology
+                    last_result.get("raw_text"), chunk, self.pipeline.ontology
                 ),
             )
-            if prior
-            else None
-        )
-        last_result = prior[-1] if prior else None
-        retry_count = 1 + self.pipeline.plan["retry_policy"]["retries"]
-        for provider, stage in providers:
-            previous_count = sum(
-                item["provider"] == provider.recipe["provider"] for item in prior
-            )
-            for index in range(previous_count, retry_count):
-                if self.used >= max_calls:
-                    self.stopped = True
-                    self.emit("run_stopped", reason="Total job call budget reached.")
-                    return False
-                if stage == "fallback" and index == 0:
-                    self.emit(
-                        "fallback_switched",
-                        chunk_id=chunk["chunk_id"],
-                        reason="Eligible primary attempts exhausted.",
-                    )
-                if not await self.retry_wait(prior, index):
-                    return False
-                last_result, _record, failure = await self.call(
-                    provider, chunk, chunk_span_id, stage, limits
+            if failure is not None:
+                self.pipeline.checkpoint(
+                    chunk, last_result, chunk_wall_seconds=time.monotonic() - started
                 )
-                prior.append(last_result)
-                if failure is None:
-                    self.pipeline.checkpoint(
-                        chunk,
-                        last_result,
-                        chunk_wall_seconds=time.monotonic() - started,
-                    )
-                    self.emit(
-                        "chunk_accepted",
-                        chunk_id=chunk["chunk_id"],
-                        provider=provider.recipe["provider"],
-                    )
-                    return True
-                if failure.systemic or not failure.retryable:
-                    self.dead_letter(chunk, failure)
-                    self.stopped = True
-                    self.emit(
-                        "run_stopped",
-                        category=failure.category,
-                        reason=failure.reason,
-                    )
-                    return False
-        if last_result is not None and failure is not None:
-            self.pipeline.checkpoint(
-                chunk, last_result, chunk_wall_seconds=time.monotonic() - started
-            )
-            self.dead_letter(chunk, failure)
-            self.stopped = True
-            self.emit(
-                "run_stopped",
-                reason="Chunk exhausted eligible attempts; review before continuing.",
-            )
+                self.dead_letter(chunk, failure)
+                self.stopped = True
+                self.emit(
+                    "run_stopped",
+                    reason="Chunk exhausted eligible attempts; review before continuing.",
+                )
         return False
 
     def preflight(
