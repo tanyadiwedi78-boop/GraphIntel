@@ -7,6 +7,7 @@ import re
 import socket
 import ssl
 import time
+from typing import Any, Optional
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
@@ -87,12 +88,13 @@ def transport_detail(cause):
 
 
 class JSONProvider:
-    def __init__(self, provider, model, max_output_tokens, timeout=120, opener=None):
+    def __init__(self, provider: str, model: str, max_output_tokens: int,
+                 timeout: float = 120, opener: Optional[Any] = None) -> None:
         # OpenRouter model ids look like "vendor/name:free", so they keep / and :.
         pattern = r'[A-Za-z0-9._/:~-]+' if provider == 'openrouter' else r'[A-Za-z0-9._-]+'
         if provider not in ('gemini', 'openai', 'openrouter') or not re.fullmatch(pattern, model):
             raise ValueError('explicit provider and model required')
-        if type(max_output_tokens) is not int or max_output_tokens <= 0 or timeout <= 0:
+        if type(max_output_tokens) is not int or max_output_tokens <= 0 or isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError('positive output limit and timeout required')
         self.provider = provider
         self.model = model
@@ -212,7 +214,7 @@ class JSONProvider:
                 'text': {'format': {'type': 'json_schema', 'name': 'extraction',
                                     'strict': True, 'schema': schema}}}
 
-    def output_text(self, data):
+    def output_text(self, data: dict) -> str:
         if not isinstance(data, dict):
             raise ValueError('provider envelope must be an object')
         texts = []
@@ -235,6 +237,8 @@ class JSONProvider:
         elif self.provider == 'openrouter':
             choices = data.get('choices')
             if not isinstance(choices, list) or len(choices) != 1:
+                raise ValueError('incomplete or refused')
+            if choices[0].get('finish_reason') not in (None, 'stop'):
                 raise ValueError('incomplete or refused')
             message = choices[0].get('message') or {}
             if message.get('refusal'):

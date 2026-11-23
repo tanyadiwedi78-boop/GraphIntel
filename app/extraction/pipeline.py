@@ -12,6 +12,7 @@ from typing import Any, Optional
 from app.evaluation.extraction_benchmark import benchmark, identity
 from app.extraction.contracts import CONTRACT_VERSION, ExtractionPayload, check_source_contract, ontology_contract
 from app.extraction.providers import CallFailure
+from app.extraction.observability import redact, scrub
 TYPE_MEANINGS = {
     "Company": "a business acting for itself, such as the filing company or a business it names",
     "Subsidiary": "a company owned or controlled by another company",
@@ -346,43 +347,6 @@ def validated_record(raw, chunk, ontology):
     return record
 
 
-def redact(text: str) -> str:
-    """Mask anything that could be an API key before it lands in a log.
-
-    First pass hides the exact configured key values wherever a provider
-    echoes them back. Second pass hides common key shapes (key= URL
-    parameters, Bearer tokens, known key prefixes) even when no key is
-    configured in this process, so an unexpected echo is still masked.
-    """
-    text = str(text)
-    for name in ('GEMINI_API_KEY', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY'):
-        value = os.environ.get(name, '').strip()
-        if len(value) >= 8:
-            text = text.replace(value, '[redacted-key]')
-    text = re.sub(r'(?i)((?:key|api_key|apikey|access_token|token)=|bearer\s+)[A-Za-z0-9._\-]{4,}',
-                  '\\1[redacted]', text)
-    text = re.sub(r'(?<![A-Za-z0-9_\-])(?:sk-or-[A-Za-z0-9_\-]{4,}|sk-[A-Za-z0-9_\-]{8,}|AIza[A-Za-z0-9_\-]{8,})',
-                  '[redacted-key]', text)
-    return text
-
-
-def scrub(value: Any) -> Any:
-    """Redact every string inside a log event value before it is written."""
-    if isinstance(value, str):
-        return redact(value)
-    if isinstance(value, list):
-        cleaned = []
-        for item in value:
-            cleaned.append(scrub(item))
-        return cleaned
-    if isinstance(value, dict):
-        cleaned = {}
-        for key, item in value.items():
-            cleaned[key] = scrub(item)
-        return cleaned
-    return value
-
-
 def failure_reason(result: dict, record: Optional[dict]) -> str:
     """One grounded sentence for why an attempt produced no accepted record.
 
@@ -552,12 +516,17 @@ class Pipeline:
             raise ValueError('job dollar reservation budget exhausted')
         self.reserved_totals = totals
 
-    def retryable(self, result, chunk):
+    def retryable(self, result: dict, chunk: dict) -> bool:
         # Retrying a known invalid returned output is different from resending
         # a POST whose outcome is unknown. Never retry unknown/auth/refusal.
+        from app.extraction.failures import classify_failure
+        record = validated_record(result.get("raw_text"), chunk, self.ontology)
+        failure = classify_failure(result, record)
+        if failure is not None and (failure.systemic or failure.ambiguous):
+            return False
         if result.get('raw_text') is not None:
             return not validated_record(result['raw_text'], chunk, self.ontology)['accepted']
-        return (result.get('outcome') == 'batch_error_retryable' or (result.get('outcome') == 'http_failure' and result.get('http_status') in (429, 500, 502, 503, 504)))
+        return (result.get('outcome') == 'batch_error_retryable' or (result.get('outcome') == 'http_failure' and result.get('http_status') in (500, 502, 503, 504)))
 
     def next_provider(self, chunk, prior, fallback_authorized):
         if prior and not self.retryable(prior[-1], chunk):
@@ -918,7 +887,7 @@ class Pipeline:
                         pass
                 error = row.get('error') or {}
                 status = row.get('http_status')
-                if raw_text is None and status in (429, 500, 502, 503, 504):
+                if raw_text is None and status in (500, 502, 503, 504):
                     outcome = 'http_failure'
                 elif raw_text is None and error.get('code') in (8, 13, 14):
                     outcome = 'batch_error_retryable'  # gRPC code, NOT an HTTP429 metric
@@ -1159,7 +1128,7 @@ def offline_demo(ontology):
             'next': 'Review source, entities, endpoints and evidence. Real extraction still needs approved model/account/budget.'}
 
 
-def main(argv=None):
+def main(argv: Optional[list] = None) -> int:
     """One entry point, explicit stages, no implicit paid fallback or graph writes."""
     import argparse
     from app.extraction.providers import JSONProvider
@@ -1167,7 +1136,7 @@ def main(argv=None):
     from app.graph.construction import resolve, graph_plan
 
     parser = argparse.ArgumentParser(description='Phase 1: prepare, extract, review/report, resolve, graph plan')
-    parser.add_argument('stage', choices=['demo', 'prepare', 'run', 'report', 'budget', 'calibrate', 'identity-eval', 'registry', 'resolve', 'graph', 'write', 'compare-prepare', 'compare', 'batch-submit', 'batch-collect'])
+    parser.add_argument('stage', choices=['demo', 'prepare', 'run', 'report', 'budget', 'calibrate', 'identity-eval', 'registry', 'resolve', 'graph', 'write', 'compare-prepare', 'compare', 'batch-submit', 'batch-collect', 'dashboard', 'replay-prepare'])
     parser.add_argument('--job', type=Path)
     parser.add_argument('--ontology', type=Path, default=Path('configs/ontology.json'))
     parser.add_argument('--chunks', type=Path)
@@ -1182,6 +1151,11 @@ def main(argv=None):
     parser.add_argument('--paid-fallback-authorized', action='store_true', help='Separate paid-scope acknowledgement; not supplied by selecting OpenAI')
     parser.add_argument('--fallback-authorized', action='store_true', help='Authorize the configured fallback after verifying its account, exact model and separate quota')
     parser.add_argument('--openrouter-fallback-model', help='OpenRouter model for the fallback slot when the primary is Gemini')
+    parser.add_argument('--reports-root', type=Path, default=Path('reports'))
+    parser.add_argument('--run-report', type=Path, help='Existing local run report directory for offline dashboard rendering')
+    parser.add_argument('--dead-letter', type=Path)
+    parser.add_argument('--replay-reviews', type=Path)
+    parser.add_argument('--new-job', type=Path)
     parser.add_argument('--cache', type=Path)
     parser.add_argument('--pricing', type=Path, help='Verified exact-model standard USD rates and account/timestamp/source')
     parser.add_argument('--cost-limits', type=Path, help='USD total and document-hash ceilings plus original authority reference')
@@ -1338,8 +1312,10 @@ def main(argv=None):
                         problem = fallback.check_dns()
                         if problem:
                             parser.error(problem)
-                result = pipe.run(args.max_calls, args.rpm, args.execute_authorized, fallback_authorized,
-                                  tokens_per_minute=args.tpm, provider_limits=provider_limits)
+                import asyncio
+                from app.extraction.async_runner import AsyncRunner
+                result = asyncio.run(AsyncRunner(pipe, args.reports_root).run(
+                    args.max_calls, provider_limits, args.execute_authorized, fallback_authorized))
             elif args.stage == 'batch-submit':
                 result = pipe.batch_submit(args.max_calls, args.execute_authorized, args.paid_fallback_authorized or args.fallback_authorized,
                                            args.batch_max_requests, args.batch_max_input_units)
@@ -1347,6 +1323,18 @@ def main(argv=None):
                 if args.wave is None:
                     parser.error('batch-collect requires wave number')
                 result = pipe.batch_collect(args.wave)
+            elif args.stage == 'dashboard':
+                if args.run_report is None:
+                    parser.error('dashboard requires --run-report pointing to a local run folder')
+                from app.extraction.reporting import write_dashboard
+                result = {'dashboard': str(write_dashboard(pipe, args.run_report,
+                    load(args.labels) if args.labels else None,
+                    load(args.evidence_reviews) if args.evidence_reviews else None))}
+            elif args.stage == 'replay-prepare':
+                if not (args.dead_letter and args.replay_reviews and args.new_job):
+                    parser.error('replay-prepare requires --dead-letter, --replay-reviews and --new-job')
+                from app.extraction.recovery import prepare_replay
+                result = prepare_replay(pipe, args.dead_letter, load(args.replay_reviews), args.new_job)
             elif args.stage == 'report':
                 result = pipe.report(load(args.labels) if args.labels else None,
                                      load(args.evidence_reviews) if args.evidence_reviews else None,

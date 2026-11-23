@@ -165,10 +165,10 @@ def pipe_for_retry(tmp_path, ontology, values):
 
 def test_which_statuses_are_retried(tmp_path, ontology):
     pipe, chunk = pipe_for_retry(tmp_path, ontology, [])
-    for status in (429, 500, 502, 503, 504):
+    for status in (500, 502, 503, 504):
         result = {"outcome": "http_failure", "http_status": status, "raw_text": None}
         assert pipe.retryable(result, chunk) is True, status
-    for status in (400, 401, 402, 403, 404, 408):
+    for status in (400, 401, 402, 403, 404, 408, 429):
         result = {"outcome": "http_failure", "http_status": status, "raw_text": None}
         assert pipe.retryable(result, chunk) is False, status
     # A provider outage whose outcome is unknown is never resent blindly.

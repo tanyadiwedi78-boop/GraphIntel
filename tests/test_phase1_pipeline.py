@@ -100,12 +100,12 @@ def test_zero_budget_zero_requests(tmp_path, ontology, chunk):
     assert p.primary.calls == 0
 
 
-def test_known_429_explicit_fallback_and_total_budget(tmp_path, ontology, chunk, payload_data):
-    p = pipe(tmp_path, ontology, chunk, [CallFailure('http_failure', 429)], [json.dumps(payload_data)])
+def test_known_server_error_explicit_fallback_and_total_budget(tmp_path, ontology, chunk, payload_data):
+    p = pipe(tmp_path, ontology, chunk, [CallFailure('http_failure', 500)], [json.dumps(payload_data)])
     report = p.run(2, 100, True, True)
     assert p.primary.calls == p.fallback.calls == 1
     assert records(p)[0]['provider'] == 'openai'
-    assert report['rate_limit_failure_rate']['value'] == 0.5
+    assert report['rate_limit_failure_rate']['value'] == 0
     assert report['calls']['attempts'] == 2
 
 
@@ -528,7 +528,7 @@ def test_reconciled_cost_ledger_binds_exact_attempt_without_mutating_outputs(tmp
 
 
 def test_retry_then_fallback_exhausts_primary_not_first_error(tmp_path, ontology, chunk, payload_data):
-    primary = FakeProvider([CallFailure('http_failure', 429), '{}', '{}'])
+    primary = FakeProvider([CallFailure('http_failure', 500), '{}', '{}'])
     fallback = FakeProvider([json.dumps(payload_data)], 'openai')
     job = tmp_path / 'policy'
     prepare(job, [chunk], ontology, primary.recipe, fallback.recipe, retry_policy(2))
@@ -651,7 +651,7 @@ def test_run_log_explains_validation_rejection(tmp_path, ontology, chunk):
 def test_run_log_shows_fallback_switch(tmp_path, ontology, chunk, payload_data):
     # When the primary's attempts are exhausted and the fallback takes over,
     # the log shows the switch and which stage each attempt belonged to.
-    primary = FakeProvider([CallFailure('http_failure', 429)])
+    primary = FakeProvider([CallFailure('http_failure', 500)])
     fallback = FakeProvider([json.dumps(payload_data)], 'openai')
     job = tmp_path / 'job'
     prepare(job, [chunk], ontology, primary.recipe, fallback.recipe, policy=retry_policy(0))
@@ -1040,7 +1040,8 @@ def test_fresh_extraction_without_any_legacy_modules(tmp_path, chunk):
     import sys
     import shutil
     root = Path(__file__).resolve().parents[1]
-    needed = ['app/extraction/contracts.py', 'app/extraction/providers.py',
+    needed = ['app/extraction/observability.py', 'app/extraction/failures.py',
+              'app/extraction/contracts.py', 'app/extraction/providers.py',
               'app/extraction/pipeline.py', 'app/evaluation/extraction_benchmark.py',
               'app/graph/construction.py', 'app/graph/resolution.py',
               'app/graph/neo4j_store.py', 'app/graph/ontology.py',
@@ -1099,7 +1100,7 @@ def test_entrypoint_without_args_is_safe_guidance_even_without_pipeline(tmp_path
 def test_openrouter_fallback_with_gemini_primary(tmp_path, ontology, chunk, payload_data):
     # The production contract allows the user's chosen shape: Gemini
     # primary with an OpenRouter fallback.
-    primary = FakeProvider([CallFailure('http_failure', 429)])
+    primary = FakeProvider([CallFailure('http_failure', 500)])
     fallback = FakeProvider([json.dumps(payload_data)], 'openrouter')
     job = tmp_path / 'job'
     prepare(job, [chunk], ontology, primary.recipe, fallback.recipe, policy=retry_policy(0))
@@ -1208,7 +1209,7 @@ def test_live_shaped_fallback_without_published_tpm(tmp_path, ontology, chunk, p
         def ready(self):
             pass
 
-    primary = LiveShapedProvider([CallFailure('http_failure', 429)], 'gemini')
+    primary = LiveShapedProvider([CallFailure('http_failure', 500)], 'gemini')
     fallback = LiveShapedProvider([json.dumps(payload_data)], 'openrouter')
     pricing = {'gemini': pricing_for(input_rate='0', output_rate='0'),
                'openrouter': pricing_for(input_rate='0', output_rate='0')}
