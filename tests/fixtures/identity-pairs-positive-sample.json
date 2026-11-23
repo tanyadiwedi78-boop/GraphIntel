@@ -1,0 +1,70 @@
+[
+ {
+  "left": {
+   "entity_type": "Company",
+   "canonical_name": "Apple Inc.",
+   "description": "Registrant full name; the filing states the terms \"Company\" and \"Apple\" refer collectively to Apple Inc. and its wholly owned subsidiaries."
+  },
+  "right": {
+   "entity_type": "Company",
+   "canonical_name": "Apple",
+   "description": "Short name defined by the same alias sentence in the products excerpt."
+  },
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-19",
+  "user_confirmed": false,
+  "same_entity": true,
+  "pair_hash": "72e786adbff967d1ea8f94ed30e7302397425b5cf72e21bce5a7ce228d5e02cb"
+ },
+ {
+  "left": {
+   "entity_type": "Product",
+   "canonical_name": "iPhone",
+   "description": "The Company's line of smartphones based on its iOS operating system."
+  },
+  "right": {
+   "entity_type": "Product",
+   "canonical_name": "Mac",
+   "description": "The Company's line of personal computers based on its macOS operating system."
+  },
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-19",
+  "user_confirmed": false,
+  "same_entity": false,
+  "pair_hash": "623d208f4b79069323100396ea84ef4a119e811f33f13a3c1c8e2145af3790e5"
+ },
+ {
+  "left": {
+   "entity_type": "Product",
+   "canonical_name": "Apple TV",
+   "description": "The Company's media streaming and gaming device based on its tvOS operating system."
+  },
+  "right": {
+   "entity_type": "Product",
+   "canonical_name": "Apple TV+",
+   "description": "Subscription streaming service offering exclusive content; same surface name plus a plus sign, different offering."
+  },
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-19",
+  "user_confirmed": false,
+  "same_entity": false,
+  "pair_hash": "6c45cf14072abf695f92da60150f8f32fbd36c93611b4db910618fd436987a2d"
+ },
+ {
+  "left": {
+   "entity_type": "Technology",
+   "canonical_name": "iOS",
+   "description": "Operating system behind the iPhone line."
+  },
+  "right": {
+   "entity_type": "Technology",
+   "canonical_name": "macOS",
+   "description": "Operating system behind the Mac line."
+  },
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-19",
+  "user_confirmed": false,
+  "same_entity": false,
+  "pair_hash": "c05c95930395fd1a2c810fd879bbd52992aef414725885c570eaf7fcbc8007c7"
+ }
+]

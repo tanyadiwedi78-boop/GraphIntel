@@ -1,0 +1,157 @@
+{
+ "aapl-10k-2023-0000320193-23-000106-excerpt-products-000": {
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-19",
+  "user_confirmed": false,
+  "source_hash": "2f00431aaa293f1b11a169365b145df329843f913d447de168b79015e44543bf",
+  "entities": [
+   {
+    "canonical_name": "Apple Inc.",
+    "entity_type": "Company"
+   },
+   {
+    "canonical_name": "iPhone",
+    "entity_type": "Product"
+   },
+   {
+    "canonical_name": "Mac",
+    "entity_type": "Product"
+   },
+   {
+    "canonical_name": "iPad",
+    "entity_type": "Product"
+   },
+   {
+    "canonical_name": "iOS",
+    "entity_type": "Technology"
+   },
+   {
+    "canonical_name": "macOS",
+    "entity_type": "Technology"
+   },
+   {
+    "canonical_name": "iPadOS",
+    "entity_type": "Technology"
+   }
+  ],
+  "relationships": [
+   {
+    "relationship_type": "MENTIONS",
+    "source_entity": "Apple Inc.",
+    "target_entity": "iPhone"
+   },
+   {
+    "relationship_type": "MENTIONS",
+    "source_entity": "Apple Inc.",
+    "target_entity": "Mac"
+   },
+   {
+    "relationship_type": "MENTIONS",
+    "source_entity": "Apple Inc.",
+    "target_entity": "iPad"
+   }
+  ],
+  "name_groups": [
+   [
+    "Apple Inc.",
+    "Apple",
+    "the Company"
+   ]
+  ]
+ },
+ "aapl-10k-2023-0000320193-23-000106-excerpt-competition-001": {
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-19",
+  "user_confirmed": false,
+  "source_hash": "5bf6045a86d47138e53930ad305d797e3759a375f408783e464a6f6f78d0b43d",
+  "entities": [
+   {
+    "canonical_name": "Apple Inc.",
+    "entity_type": "Company"
+   }
+  ],
+  "relationships": [],
+  "name_groups": []
+ },
+ "aapl-10k-2023-0000320193-23-000106-excerpt-services-002": {
+  "reviewed": true,
+  "reviewer": "instinct-agent source review 2026-11-19",
+  "user_confirmed": false,
+  "source_hash": "5355dc216a572676f911667ba8e0ab0d82d65409addf968fcb3e3c3ab1a2c461",
+  "entities": [
+   {
+    "canonical_name": "Apple Inc.",
+    "entity_type": "Company"
+   },
+   {
+    "canonical_name": "Apple Watch",
+    "entity_type": "Product"
+   },
+   {
+    "canonical_name": "AirPods",
+    "entity_type": "Product"
+   },
+   {
+    "canonical_name": "HomePod",
+    "entity_type": "Product"
+   },
+   {
+    "canonical_name": "Apple TV",
+    "entity_type": "Product"
+   },
+   {
+    "canonical_name": "watchOS",
+    "entity_type": "Technology"
+   },
+   {
+    "canonical_name": "tvOS",
+    "entity_type": "Technology"
+   },
+   {
+    "canonical_name": "App Store",
+    "entity_type": "Product"
+   },
+   {
+    "canonical_name": "Apple Music",
+    "entity_type": "Product"
+   },
+   {
+    "canonical_name": "Apple TV+",
+    "entity_type": "Product"
+   }
+  ],
+  "relationships": [
+   {
+    "relationship_type": "MENTIONS",
+    "source_entity": "Apple Inc.",
+    "target_entity": "Apple Watch"
+   },
+   {
+    "relationship_type": "MENTIONS",
+    "source_entity": "Apple Inc.",
+    "target_entity": "AirPods"
+   },
+   {
+    "relationship_type": "MENTIONS",
+    "source_entity": "Apple Inc.",
+    "target_entity": "Apple TV"
+   },
+   {
+    "relationship_type": "MENTIONS",
+    "source_entity": "Apple Inc.",
+    "target_entity": "App Store"
+   },
+   {
+    "relationship_type": "MENTIONS",
+    "source_entity": "Apple Inc.",
+    "target_entity": "Apple Music"
+   },
+   {
+    "relationship_type": "MENTIONS",
+    "source_entity": "Apple Inc.",
+    "target_entity": "Apple TV+"
+   }
+  ],
+  "name_groups": []
+ }
+}

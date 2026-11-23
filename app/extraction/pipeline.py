@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import time
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, Optional
 
 from app.evaluation.extraction_benchmark import benchmark, identity
 from app.extraction.contracts import CONTRACT_VERSION, ExtractionPayload, check_source_contract, ontology_contract
@@ -217,8 +218,8 @@ def prepare(job, chunks, ontology, primary_recipe, fallback_recipe=None, policy=
     if primary_recipe['provider'] == 'openrouter' and execution_mode != 'sync':
         raise ValueError('OpenRouter supports only sync execution here')
     if fallback_recipe and (purpose == 'comparison' or primary_recipe['provider'] != 'gemini'
-                            or fallback_recipe['provider'] != 'openai'):
-        raise ValueError('production is Gemini primary/OpenAI fallback; comparison has no fallback')
+                            or fallback_recipe['provider'] not in ('openai', 'openrouter')):
+        raise ValueError('production is Gemini primary with an OpenAI or OpenRouter fallback; comparison has no fallback')
     policy = policy or retry_policy()
     if policy != retry_policy(**policy):
         raise ValueError('invalid retry policy')
@@ -262,6 +263,60 @@ def prepare(job, chunks, ontology, primary_recipe, fallback_recipe=None, policy=
     return plan
 
 
+def corpus_budget(plan, rpm=None):
+    """Per-document and job-wide worst-case budget projection from a frozen plan.
+
+    Reads only the saved plan: no network and no provider calls. Every number
+    is a conservative maximum fixed at prepare time, never an actual charge.
+    Call counts assume every chunk exhausts the full retry policy, which
+    almost never happens; real runs usually need fewer attempts.
+    """
+    documents = plan.get('document_budgets')
+    if not isinstance(documents, dict) or not documents:
+        raise ValueError('plan carries no document budgets; prepare the job again without changing old jobs')
+    per_document = {}
+    total_chunks = 0
+    total_calls = 0
+    total_usd = Decimal(0)
+    every_document_priced = True
+    for key in sorted(documents):
+        document = documents[key]
+        chunks = document['chunks']
+        calls = document['maximum_path_calls']
+        usd = document['maximum_reserved_usd']
+        total_chunks += chunks
+        total_calls += calls
+        if usd is None:
+            every_document_priced = False
+            note = document.get('cost_status') or 'Not priced'
+        else:
+            total_usd += money(usd)
+            note = 'Conservative maximum, not actual charge'
+        per_document[key] = {'chunks': chunks, 'maximum_path_calls': calls,
+                             'maximum_reserved_usd': usd, 'cost_status': note}
+    result = {'plan_hash': plan.get('plan_hash'),
+              'documents': per_document,
+              'total_chunks': total_chunks,
+              'maximum_path_calls': total_calls,
+              'calls_basis': 'Every chunk exhausts the retry policy on the primary provider'
+                             + (' and the fallback' if plan.get('fallback') else '')
+                             + '; real runs usually need fewer attempts.'}
+    if every_document_priced:
+        result['maximum_reserved_usd'] = str(total_usd)
+        result['cost_status'] = 'Conservative maximum, not actual charge'
+    else:
+        result['maximum_reserved_usd'] = None
+        result['cost_status'] = 'Not priced for every document; execution stays blocked until pricing is verified'
+    if rpm is not None:
+        if not math.isfinite(rpm) or rpm <= 0:
+            raise ValueError('explicit positive requests-per-minute required for pacing')
+        result['pacing_floor_minutes'] = total_calls / rpm
+        result['pacing_basis'] = ('Pure request-rate floor: worst-case attempts divided by the local rate. '
+                                  'Excludes provider latency, Retry-After waits and any daily cap, '
+                                  'which can only make the real elapsed time longer.')
+    return result
+
+
 def validated_record(raw, chunk, ontology):
     record = {'chunk_id': chunk['chunk_id'], 'source_hash': identity(chunk['text']),
               'raw_text': raw, 'accepted': False, 'entities': [], 'relationships': [],
@@ -289,6 +344,73 @@ def validated_record(raw, chunk, ontology):
             record['held_relationships'] = held
         record.update(accepted=True, **accepted_payload)
     return record
+
+
+def redact(text: str) -> str:
+    """Mask anything that could be an API key before it lands in a log.
+
+    First pass hides the exact configured key values wherever a provider
+    echoes them back. Second pass hides common key shapes (key= URL
+    parameters, Bearer tokens, known key prefixes) even when no key is
+    configured in this process, so an unexpected echo is still masked.
+    """
+    text = str(text)
+    for name in ('GEMINI_API_KEY', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY'):
+        value = os.environ.get(name, '').strip()
+        if len(value) >= 8:
+            text = text.replace(value, '[redacted-key]')
+    text = re.sub(r'(?i)((?:key|api_key|apikey|access_token|token)=|bearer\s+)[A-Za-z0-9._\-]{4,}',
+                  '\\1[redacted]', text)
+    text = re.sub(r'(?<![A-Za-z0-9_\-])(?:sk-or-[A-Za-z0-9_\-]{4,}|sk-[A-Za-z0-9_\-]{8,}|AIza[A-Za-z0-9_\-]{8,})',
+                  '[redacted-key]', text)
+    return text
+
+
+def scrub(value: Any) -> Any:
+    """Redact every string inside a log event value before it is written."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        cleaned = []
+        for item in value:
+            cleaned.append(scrub(item))
+        return cleaned
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            cleaned[key] = scrub(item)
+        return cleaned
+    return value
+
+
+def failure_reason(result: dict, record: Optional[dict]) -> str:
+    """One grounded sentence for why an attempt produced no accepted record.
+
+    Uses only what the provider returned and what validation found. When the
+    provider gives no usable detail, it says so instead of guessing.
+    """
+    parts = []
+    problems = record.get('problems') if record else None
+    if problems:
+        for problem in problems:
+            parts.append(str(problem))
+    elif result.get('raw_text') is not None and record and not record.get('accepted'):
+        parts.append('response failed schema or evidence validation')
+    if result.get('outcome'):
+        parts.append('outcome: ' + str(result['outcome']))
+    if result.get('http_status') is not None:
+        parts.append('HTTP ' + str(result['http_status']))
+    codes = result.get('provider_codes')
+    if codes:
+        parts.append('provider codes: ' + ', '.join(str(code) for code in codes))
+    if result.get('retry_after') is not None:
+        parts.append('provider asked to retry after ' + str(result['retry_after']) + ' seconds')
+    detail = result.get('transport_detail')
+    if detail:
+        parts.append('detail: ' + str(detail))
+    if not parts:
+        return 'provider gave no failure reason'
+    return '; '.join(parts)
 
 
 class Pipeline:
@@ -341,13 +463,24 @@ class Pipeline:
         except CallFailure as error:
             result = {'http_status': error.status, 'outcome': error.kind,
                       'retry_after': error.retry_after, 'raw_text': None,
-                      'transport_detail': error.detail,
+                      'transport_detail': redact(error.detail) if isinstance(error.detail, str) else error.detail,
                       'provider_codes': error.provider_codes,
                       'cost_usd': None, 'request_seconds': self.clock() - started}
         # Unexpected error leaves a claim without result: no retry on resume.
         result.update(claim)
         save_new(str(stem) + '-result.json', result)
         return result
+
+    def log_event(self, event: dict) -> None:
+        # Append one JSON line to the job's run log. Appending never
+        # overwrites: a resumed run adds its lines after the previous run's.
+        # Prompts and response text are never written here, and every
+        # string passes through scrub() so a provider message cannot
+        # carry an API key into the log.
+        entry = {'ts': datetime.now(timezone.utc).isoformat()}
+        entry.update(scrub(event))
+        with (self.job / 'run-log.jsonl').open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + '\n')
 
     def cache_path(self, chunk):
         if not self.cache_dir:
@@ -476,8 +609,10 @@ class Pipeline:
         for name, limit in limits.items():
             if type(limit.get('rpm')) not in (int, float) or not math.isfinite(limit['rpm']) or limit['rpm'] <= 0:
                 raise ValueError('positive finite per-provider RPM required')
-            if self.primary.recipe.get('execution_mode') != 'offline_fixture' and (type(limit.get('tpm')) is not int or limit['tpm'] <= 0):
-                raise ValueError('positive per-provider TPM required')
+            tpm_limit = limit.get('tpm')
+            if (self.primary.recipe.get('execution_mode') != 'offline_fixture' and tpm_limit is not None
+                    and (type(tpm_limit) is not int or tpm_limit <= 0)):
+                raise ValueError('positive per-provider TPM when the provider publishes one')
         token_events = {name: [] for name in limits}
         last_start = {name: self.clock() for name in limits}
         lock = self.job / 'run-lock.json'
@@ -509,6 +644,13 @@ class Pipeline:
                     source = next(c for c in self.plan['chunks'] if c['chunk_id'] == previous['chunk_id'])
                     reserved = len(self.prompt(source).encode()) + len(json.dumps(self.plan['schema']).encode()) + 4096 + previous['recipe'].get('max_output_tokens', 0)
                     token_events[name].append((started, reserved))
+            stop_reason = None
+            self.log_event({'event': 'run_started', 'job': str(self.job),
+                'chunks_total': len(self.plan['chunks']), 'max_calls': max_calls,
+                'primary_provider': self.primary.recipe['provider'], 'primary_model': self.primary.recipe['model'],
+                'fallback_provider': self.fallback.recipe['provider'] if self.fallback else None,
+                'fallback_model': self.fallback.recipe['model'] if self.fallback else None,
+                'prior_attempts': used})
             for chunk in self.plan['chunks']:
                 record_path = self.job / ('chunk-' + identity(chunk['chunk_id']) + '.json')
                 if record_path.exists():
@@ -522,6 +664,10 @@ class Pipeline:
                         raise ValueError('cache identity or validation failed')
                     record.update(cache_hit=True, origin_provider=cached['record'].get('provider'))
                     save_new(record_path, record)
+                    self.log_event({'event': 'chunk_finished', 'chunk_id': chunk['chunk_id'],
+                        'accepted': True, 'cache_hit': True,
+                        'provider': cached['record'].get('provider'), 'model': None,
+                        'attempts_used': 0})
                     continue
                 chunk_start = self.clock() if not prior else None
                 while True:
@@ -531,7 +677,15 @@ class Pipeline:
                             self.checkpoint(chunk, prior[-1], recovered=True,
                                 chunk_wall_seconds=self.clock() - chunk_start if chunk_start is not None else None)
                         break
+                    if (self.fallback and provider is self.fallback
+                            and any(r['provider'] == self.primary.recipe['provider'] for r in prior)
+                            and not any(r['provider'] == self.fallback.recipe['provider'] for r in prior)):
+                        self.log_event({'event': 'fallback_switched', 'chunk_id': chunk['chunk_id'],
+                            'from_provider': self.primary.recipe['provider'], 'from_model': self.primary.recipe['model'],
+                            'to_provider': self.fallback.recipe['provider'], 'to_model': self.fallback.recipe['model'],
+                            'reason': 'primary attempts exhausted for this chunk'})
                     if used >= max_calls:
+                        stop_reason = 'total call budget reached; resume later with the same job'
                         break  # no terminal checkpoint: safe to continue known retries later
                     name = provider.recipe['provider']
                     interval = 60 / limits[name]['rpm']
@@ -568,14 +722,60 @@ class Pipeline:
                         events.append((now, reserved))
                     last_start[name] = self.clock()
                     used += 1
-                    result = self.attempt(provider, chunk, used, reservation)
+                    self.log_event({'event': 'attempt_started', 'attempt': used,
+                        'chunk_id': chunk['chunk_id'],
+                        'stage': 'primary' if provider is self.primary else 'fallback',
+                        'provider': name, 'model': provider.recipe['model'],
+                        'attempt_for_chunk': sum(r['provider'] == name for r in prior) + 1})
+                    try:
+                        result = self.attempt(provider, chunk, used, reservation)
+                    except Exception as error:
+                        # An unexpected failure still leaves a trace: the log
+                        # shows the attempt started and the run died here,
+                        # instead of stopping silently. The claim file stays
+                        # without a result, so a resume never retries it.
+                        self.log_event({'event': 'run_failed', 'chunk_id': chunk['chunk_id'],
+                            'error_type': type(error).__name__, 'message': str(error)})
+                        raise
                     prior.append(result)
                     attempts.append(result)
-                    if validated_record(result.get('raw_text'), chunk, self.ontology)['accepted']:
+                    latest = validated_record(result.get('raw_text'), chunk, self.ontology)
+                    self.log_event({'event': 'attempt_finished', 'attempt': used,
+                        'chunk_id': chunk['chunk_id'], 'provider': name, 'model': provider.recipe['model'],
+                        'outcome': result.get('outcome'), 'http_status': result.get('http_status'),
+                        'request_seconds': result.get('request_seconds'), 'accepted': latest['accepted'],
+                        'reason': None if latest['accepted'] else failure_reason(result, latest)})
+                    if latest['accepted']:
                         self.checkpoint(chunk, result, chunk_wall_seconds=self.clock() - chunk_start if chunk_start is not None else None)
+                        self.log_event({'event': 'chunk_finished', 'chunk_id': chunk['chunk_id'],
+                            'accepted': True, 'cache_hit': False,
+                            'provider': name, 'model': provider.recipe['model'],
+                            'attempts_used': len(prior)})
                         break
-                if prior and (prior[-1]['http_status'] is None or prior[-1]['http_status'] in (400, 401, 402, 403, 404)):
+                # Stop the whole run after any chunk that produced no accepted
+                # record: transport error, quota/rate-limit or any other HTTP
+                # failure (including 429 and 5xx), or a returned response that
+                # failed schema/evidence validation. The failed attempt and the
+                # terminal record stay saved as evidence, completed chunks keep
+                # their checkpoints, and a later run resumes with the next
+                # unfinished chunk. Before this, only some HTTP statuses
+                # stopped the run and a rejected response did not stop it at
+                # all, so a limited run could keep calling past a failure.
+                if prior and not validated_record(prior[-1].get('raw_text'), chunk, self.ontology)['accepted']:
+                    stop_reason = 'chunk ' + chunk['chunk_id'] + ' produced no accepted record; run stopped for review'
+                    self.log_event({'event': 'chunk_finished', 'chunk_id': chunk['chunk_id'],
+                        'accepted': False, 'cache_hit': False,
+                        'provider': prior[-1]['provider'], 'model': prior[-1]['recipe']['model'],
+                        'attempts_used': len(prior),
+                        'reason': failure_reason(prior[-1], validated_record(prior[-1].get('raw_text'), chunk, self.ontology))})
                     break
+            completed = 0
+            for done in self.plan['chunks']:
+                if (self.job / ('chunk-' + identity(done['chunk_id']) + '.json')).exists():
+                    completed += 1
+            self.log_event({'event': 'run_finished', 'chunks_completed': completed,
+                'chunks_total': len(self.plan['chunks']), 'stopped_early': stop_reason is not None,
+                'reason': stop_reason if stop_reason else 'all chunks finished'})
             return self.report()
         finally:
             lock.unlink()
@@ -967,7 +1167,7 @@ def main(argv=None):
     from app.graph.construction import resolve, graph_plan
 
     parser = argparse.ArgumentParser(description='Phase 1: prepare, extract, review/report, resolve, graph plan')
-    parser.add_argument('stage', choices=['demo', 'prepare', 'run', 'report', 'calibrate', 'identity-eval', 'registry', 'resolve', 'graph', 'write', 'compare-prepare', 'compare', 'batch-submit', 'batch-collect'])
+    parser.add_argument('stage', choices=['demo', 'prepare', 'run', 'report', 'budget', 'calibrate', 'identity-eval', 'registry', 'resolve', 'graph', 'write', 'compare-prepare', 'compare', 'batch-submit', 'batch-collect'])
     parser.add_argument('--job', type=Path)
     parser.add_argument('--ontology', type=Path, default=Path('configs/ontology.json'))
     parser.add_argument('--chunks', type=Path)
@@ -980,13 +1180,15 @@ def main(argv=None):
     parser.add_argument('--tpm', type=int, help='Verified local TPM; reserves UTF-8 bytes + output ceiling, not exact billed tokens')
     parser.add_argument('--execute-authorized', action='store_true', help='Use only after verifying account/model/quota and cost authority')
     parser.add_argument('--paid-fallback-authorized', action='store_true', help='Separate paid-scope acknowledgement; not supplied by selecting OpenAI')
+    parser.add_argument('--fallback-authorized', action='store_true', help='Authorize the configured fallback after verifying its account, exact model and separate quota')
+    parser.add_argument('--openrouter-fallback-model', help='OpenRouter model for the fallback slot when the primary is Gemini')
     parser.add_argument('--cache', type=Path)
     parser.add_argument('--pricing', type=Path, help='Verified exact-model standard USD rates and account/timestamp/source')
     parser.add_argument('--cost-limits', type=Path, help='USD total and document-hash ceilings plus original authority reference')
     parser.add_argument('--retries', type=int, default=2)
     parser.add_argument('--execution-mode', choices=['sync', 'native_batch'], default='sync')
     parser.add_argument('--fallback-rpm', type=float)
-    parser.add_argument('--fallback-tpm', type=int)
+    parser.add_argument('--fallback-tpm', type=int, help='Verified fallback TPM; 0 when the provider publishes no token-per-minute limit')
     parser.add_argument('--wave', type=int)
     parser.add_argument('--batch-max-requests', type=int, help='Verified local native-batch request allowance for this wave')
     parser.add_argument('--batch-max-input-units', type=int, help='Verified conservative enqueue-token allowance, bytes+overhead')
@@ -1041,8 +1243,10 @@ def main(argv=None):
                 parser.error('prepare requires chunks, an explicit Gemini or OpenRouter model and output-token limit')
             if args.gemini_model and args.openrouter_model:
                 parser.error('choose one primary: --gemini-model or --openrouter-model')
-            if args.openrouter_model and (args.openai_model or args.stage == 'compare-prepare'):
+            if args.openrouter_model and (args.openai_model or args.openrouter_fallback_model or args.stage == 'compare-prepare'):
                 parser.error('the OpenRouter experiment runs alone: no fallback, no paired comparison')
+            if args.openai_model and args.openrouter_fallback_model:
+                parser.error('choose one fallback: --openai-model or --openrouter-fallback-model')
             if not args.chunks.is_file():
                 parser.error('chunks file not found: ' + str(args.chunks) + '; run scripts/build_chunks.py first')
             if args.chunks.stat().st_size > 16 * 1024 * 1024:
@@ -1056,12 +1260,16 @@ def main(argv=None):
                 primary = JSONProvider('gemini', args.gemini_model, args.max_output_tokens)
             else:
                 primary = JSONProvider('openrouter', args.openrouter_model, args.max_output_tokens)
-            fallback = JSONProvider('openai', args.openai_model, args.max_output_tokens) if args.openai_model else None
+            fallback = None
+            if args.openai_model:
+                fallback = JSONProvider('openai', args.openai_model, args.max_output_tokens)
+            elif args.openrouter_fallback_model:
+                fallback = JSONProvider('openrouter', args.openrouter_fallback_model, args.max_output_tokens)
             policy = retry_policy(args.retries)
             pricing = load(args.pricing) if args.pricing else None
             limits = load(args.cost_limits) if args.cost_limits else None
             if args.stage == 'compare-prepare':
-                if not fallback or not args.labels:
+                if not args.openai_model or not args.labels:
                     parser.error('compare-prepare requires explicit OpenAI model and source-bound reviewed labels')
                 result = prepare_comparison(args.job, chunks, ontology, primary.recipe, fallback.recipe,
                     load(args.labels), policy, limits, pricing, args.execution_mode)
@@ -1069,6 +1277,8 @@ def main(argv=None):
                 result = prepare(args.job, chunks, ontology, primary.recipe, fallback.recipe if fallback else None,
                     policy, limits, pricing, execution_mode=args.execution_mode,
                     labels=load(args.labels) if args.labels else None)
+        elif args.stage == 'budget':
+            result = corpus_budget(load(args.job / 'plan.json'), args.rpm)
         elif args.stage == 'compare':
             manifest = load(args.job / 'comparison.json')
             providers = [JSONProvider(r['provider'], r['model'], r['max_output_tokens']) for r in manifest['providers']]
@@ -1101,11 +1311,21 @@ def main(argv=None):
                 import os
                 if not os.environ.get(primary.key_variable(), '').strip():
                     parser.error(primary.key_variable() + ' missing')
-                if args.paid_fallback_authorized and (not fallback or not os.environ.get('OPENAI_API_KEY', '').strip()):
-                    parser.error('configured fallback and OPENAI_API_KEY required')
+                fallback_authorized = args.paid_fallback_authorized or args.fallback_authorized
+                if fallback_authorized:
+                    if not fallback:
+                        parser.error('fallback authorization needs a job prepared with a fallback')
+                    if not os.environ.get(fallback.key_variable(), '').strip():
+                        parser.error('configured fallback and ' + fallback.key_variable() + ' required')
+                    if args.fallback_rpm is None or args.fallback_tpm is None:
+                        parser.error('verified separate fallback RPM/TPM required')
+                    if not math.isfinite(args.fallback_rpm) or args.fallback_rpm <= 0:
+                        parser.error('explicit positive verified fallback RPM required')
+                    if args.fallback_tpm < 0:
+                        parser.error('verified fallback token-per-minute limit, or 0 when the provider publishes none')
                 provider_limits = {primary.recipe['provider']: {'rpm': args.rpm, 'tpm': args.tpm}}
-                if args.paid_fallback_authorized:
-                    provider_limits['openai'] = {'rpm': args.fallback_rpm, 'tpm': args.fallback_tpm}
+                if fallback_authorized:
+                    provider_limits[fallback.recipe['provider']] = {'rpm': args.fallback_rpm, 'tpm': args.fallback_tpm or None}
                 # Fail before claiming when the provider host cannot even be
                 # resolved; a broken DNS would only burn a doomed attempt. The
                 # authorization gate inside run() keeps its first say: only an
@@ -1114,14 +1334,14 @@ def main(argv=None):
                     problem = primary.check_dns()
                     if problem:
                         parser.error(problem)
-                    if args.paid_fallback_authorized and fallback:
+                    if fallback_authorized and fallback:
                         problem = fallback.check_dns()
                         if problem:
                             parser.error(problem)
-                result = pipe.run(args.max_calls, args.rpm, args.execute_authorized, args.paid_fallback_authorized,
+                result = pipe.run(args.max_calls, args.rpm, args.execute_authorized, fallback_authorized,
                                   tokens_per_minute=args.tpm, provider_limits=provider_limits)
             elif args.stage == 'batch-submit':
-                result = pipe.batch_submit(args.max_calls, args.execute_authorized, args.paid_fallback_authorized,
+                result = pipe.batch_submit(args.max_calls, args.execute_authorized, args.paid_fallback_authorized or args.fallback_authorized,
                                            args.batch_max_requests, args.batch_max_input_units)
             elif args.stage == 'batch-collect':
                 if args.wave is None:

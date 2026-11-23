@@ -124,6 +124,61 @@ def test_fallback_needs_budget_and_authority(tmp_path, ontology, chunk, budget, 
     assert p.fallback.calls == 0
 
 
+def test_429_stops_the_run_before_the_next_chunk(tmp_path, ontology, chunk):
+    # A quota/rate-limit denial on one chunk must stop the run, not move on to
+    # the next chunk and keep calling into the same wall.
+    second = dict(chunk)
+    second['chunk_id'] = 'c2'
+    second['document_hash'] = 'b' * 64
+    primary = FakeProvider([CallFailure('http_failure', 429)])
+    job = tmp_path / 'job'
+    prepare(job, [chunk, second], ontology, primary.recipe, None, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, None, sleep=lambda seconds: None)
+    p.run(10, 100, True, False)
+    assert primary.calls == 1
+    saved = records(p)
+    assert len(saved) == 1
+    assert saved[0]['chunk_id'] == 'c1'
+    assert saved[0]['accepted'] is False
+
+
+def test_500_stops_the_run_before_the_next_chunk(tmp_path, ontology, chunk):
+    # Server-side failures stop the run the same way: no calling later chunks
+    # into the same wall.
+    second = dict(chunk)
+    second['chunk_id'] = 'c2'
+    second['document_hash'] = 'b' * 64
+    primary = FakeProvider([CallFailure('http_failure', 500)])
+    job = tmp_path / 'job'
+    prepare(job, [chunk, second], ontology, primary.recipe, None, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, None, sleep=lambda seconds: None)
+    p.run(10, 100, True, False)
+    assert primary.calls == 1
+    saved = records(p)
+    assert len(saved) == 1
+    assert saved[0]['accepted'] is False
+
+
+def test_rejected_response_stops_the_run_before_the_next_chunk(tmp_path, ontology, chunk, payload_data):
+    # A returned response that fails schema/evidence validation is a failure
+    # too: the run stops for review instead of quietly calling the next chunk.
+    second = dict(chunk)
+    second['chunk_id'] = 'c2'
+    second['document_hash'] = 'b' * 64
+    bad = json.loads(json.dumps(payload_data))
+    bad['entities'][0]['evidence'] = 'Acme acquired Other.'
+    primary = FakeProvider([json.dumps(bad)])
+    job = tmp_path / 'job'
+    prepare(job, [chunk, second], ontology, primary.recipe, None, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, None, sleep=lambda seconds: None)
+    p.run(10, 100, True, False)
+    assert primary.calls == 1
+    saved = records(p)
+    assert len(saved) == 1
+    assert saved[0]['chunk_id'] == 'c1'
+    assert saved[0]['accepted'] is False
+
+
 def test_retry_after_above_bound_stops(tmp_path, ontology, chunk):
     p = pipe(tmp_path, ontology, chunk, [CallFailure('http_failure', 429, 120)], ['unused'])
     p.run(2, 100, True, True, max_fallback_wait=60)
@@ -545,6 +600,140 @@ def test_zero_cost_needs_verified_free_account_and_stale_price_blocked(tmp_path,
         request_reservation(chunk, ontology, common_schema(ontology), primary.recipe, {'gemini': price})
 
 
+
+def read_run_log(job):
+    events = []
+    for line in (job / 'run-log.jsonl').read_text(encoding='utf-8').strip().split('\n'):
+        events.append(json.loads(line))
+    return events
+
+
+def test_run_log_records_attempt_reason_and_stop(tmp_path, ontology, chunk):
+    # A failed chunk leaves a readable trail: what ran, what came back, and
+    # why the run stopped. No keys or prompts appear in the log.
+    primary = FakeProvider([CallFailure('http_failure', 429)])
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, None, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, None, sleep=lambda seconds: None)
+    p.run(10, 100, True, False)
+    events = read_run_log(job)
+    kinds = [event['event'] for event in events]
+    assert kinds[0] == 'run_started'
+    assert kinds[-1] == 'run_finished'
+    started = events[kinds.index('attempt_started')]
+    assert started['stage'] == 'primary'
+    assert started['provider'] == 'gemini' and started['model'] == 'offline-fixture'
+    finished = events[kinds.index('attempt_finished')]
+    assert finished['accepted'] is False
+    assert 'HTTP 429' in finished['reason']
+    stopped = events[-1]
+    assert stopped['stopped_early'] is True
+    assert 'no accepted record' in stopped['reason']
+    for event in events:
+        text = json.dumps(event)
+        assert 'api_key' not in text and 'Authorization' not in text
+
+
+def test_run_log_explains_validation_rejection(tmp_path, ontology, chunk):
+    # A returned response that fails the schema check gets a grounded reason,
+    # not a generic error.
+    primary = FakeProvider(['not json at all'])
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, None, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, None, sleep=lambda seconds: None)
+    p.run(10, 100, True, False)
+    events = read_run_log(job)
+    finished = [event for event in events if event['event'] == 'attempt_finished']
+    assert len(finished) == 1
+    assert 'strict common schema' in finished[0]['reason']
+
+
+def test_run_log_shows_fallback_switch(tmp_path, ontology, chunk, payload_data):
+    # When the primary's attempts are exhausted and the fallback takes over,
+    # the log shows the switch and which stage each attempt belonged to.
+    primary = FakeProvider([CallFailure('http_failure', 429)])
+    fallback = FakeProvider([json.dumps(payload_data)], 'openai')
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, fallback.recipe, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, fallback, sleep=lambda seconds: None)
+    p.run(10, 100, True, True)
+    events = read_run_log(job)
+    switches = [event for event in events if event['event'] == 'fallback_switched']
+    assert len(switches) == 1
+    assert switches[0]['from_provider'] == 'gemini'
+    assert switches[0]['to_provider'] == 'openai'
+    stages = [event['stage'] for event in events if event['event'] == 'attempt_started']
+    assert stages == ['primary', 'fallback']
+    finished = events[-1]
+    assert finished['event'] == 'run_finished'
+    assert finished['stopped_early'] is False
+
+
+def test_run_log_appends_when_run_resumes(tmp_path, ontology, chunk, payload_data):
+    # A resumed run adds new lines after the old ones; earlier evidence is
+    # never overwritten.
+    second = dict(chunk)
+    second['chunk_id'] = 'c2'
+    second['document_hash'] = 'b' * 64
+    primary = FakeProvider([CallFailure('http_failure', 429)])
+    job = tmp_path / 'job'
+    prepare(job, [chunk, second], ontology, primary.recipe, None, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, None, sleep=lambda seconds: None)
+    p.run(10, 100, True, False)
+    first_lines = (job / 'run-log.jsonl').read_text(encoding='utf-8').strip().split('\n')
+    good = json.loads(json.dumps(payload_data))
+    for entity in good['entities']:
+        entity['source_chunk_id'] = 'c2'
+    for relationship in good['relationships']:
+        relationship['source_chunk_id'] = 'c2'
+    primary_two = FakeProvider([json.dumps(good)])
+    resumed = Pipeline(job, ontology, primary_two, None, sleep=lambda seconds: None)
+    resumed.run(10, 100, True, False)
+    all_lines = (job / 'run-log.jsonl').read_text(encoding='utf-8').strip().split('\n')
+    assert all_lines[:len(first_lines)] == first_lines
+    assert len(all_lines) > len(first_lines)
+
+
+def test_corpus_budget_totals_a_priced_plan(tmp_path, ontology, chunk):
+    from app.extraction.pipeline import corpus_budget
+    primary = JSONProvider('gemini', 'explicit-model', 100)
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, policy=retry_policy(2), pricing={'gemini': pricing_for()})
+    result = corpus_budget(load(job / 'plan.json'), 60)
+    key = chunk['document_hash']
+    # One chunk with two retries means three worst-case attempts.
+    assert result['documents'][key]['maximum_path_calls'] == 3
+    assert result['maximum_path_calls'] == 3
+    assert result['total_chunks'] == 1
+    # (100000 input ceiling at $1/M + 1000 output ceiling at $2/M) x 3 attempts.
+    assert result['documents'][key]['maximum_reserved_usd'] == '0.306'
+    assert result['maximum_reserved_usd'] == '0.306'
+    assert result['cost_status'] == 'Conservative maximum, not actual charge'
+    assert result['pacing_floor_minutes'] == 3 / 60
+
+
+def test_corpus_budget_unpriced_plan_stays_honest(tmp_path, ontology, chunk):
+    from app.extraction.pipeline import corpus_budget
+    primary = JSONProvider('gemini', 'explicit-model', 100)
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, policy=retry_policy(0))
+    result = corpus_budget(load(job / 'plan.json'))
+    key = chunk['document_hash']
+    assert result['maximum_path_calls'] == 1
+    assert result['documents'][key]['maximum_reserved_usd'] is None
+    assert result['maximum_reserved_usd'] is None
+    assert 'Not priced' in result['cost_status']
+    assert 'pacing_floor_minutes' not in result
+
+
+def test_corpus_budget_rejects_nonpositive_rpm(tmp_path, ontology, chunk):
+    from app.extraction.pipeline import corpus_budget
+    primary = JSONProvider('gemini', 'explicit-model', 100)
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe)
+    with pytest.raises(ValueError, match='requests-per-minute'):
+        corpus_budget(load(job / 'plan.json'), 0)
+
 def test_source_sha256_is_explicit_document_group_and_missing_hash_rejected(tmp_path, ontology, chunk):
     primary = JSONProvider('gemini', 'explicit-model', 100)
     original = dict(chunk)
@@ -905,3 +1094,136 @@ def test_entrypoint_without_args_is_safe_guidance_even_without_pipeline(tmp_path
     assert result.returncode == 2
     assert 'Historical provider commands' in result.stdout
     assert 'Traceback' not in result.stderr
+
+
+def test_openrouter_fallback_with_gemini_primary(tmp_path, ontology, chunk, payload_data):
+    # The production contract allows the user's chosen shape: Gemini
+    # primary with an OpenRouter fallback.
+    primary = FakeProvider([CallFailure('http_failure', 429)])
+    fallback = FakeProvider([json.dumps(payload_data)], 'openrouter')
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, fallback.recipe, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, fallback, sleep=lambda seconds: None)
+    p.run(10, 100, True, True)
+    assert primary.calls == 1 and fallback.calls == 1
+    events = read_run_log(job)
+    switches = [event for event in events if event['event'] == 'fallback_switched']
+    assert len(switches) == 1
+    assert switches[0]['from_provider'] == 'gemini'
+    assert switches[0]['to_provider'] == 'openrouter'
+    stages = [event['stage'] for event in events if event['event'] == 'attempt_started']
+    assert stages == ['primary', 'fallback']
+
+
+def test_openrouter_experiment_still_refuses_any_fallback(tmp_path, ontology, chunk):
+    # An OpenRouter primary remains the alone-running experiment: no
+    # fallback slot, whichever provider the fallback names.
+    primary = FakeProvider(['unused'], 'openrouter')
+    for fallback_provider in ('openrouter', 'openai'):
+        fallback = FakeProvider(['unused'], fallback_provider)
+        with pytest.raises(ValueError):
+            prepare(tmp_path / ('job-' + fallback_provider), [chunk], ontology,
+                    primary.recipe, fallback.recipe, policy=retry_policy(0))
+
+
+def test_run_log_redacts_key_shapes_in_provider_detail(tmp_path, ontology, chunk):
+    # A provider message that echoes key-shaped text must not reach the log.
+    detail = ('invalid key sk-or-v1-abcdef123456; '
+              'see https://x.test/?key=AIzaSyabc1234567890 or Bearer tokendata123')
+    primary = FakeProvider([CallFailure('http_failure', 401, detail=detail)])
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, None, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, None, sleep=lambda seconds: None)
+    p.run(10, 100, True, False)
+    text = (job / 'run-log.jsonl').read_text(encoding='utf-8')
+    assert 'sk-or-v1-abcdef123456' not in text
+    assert 'AIzaSyabc1234567890' not in text
+    assert 'tokendata123' not in text
+    assert '[redacted' in text
+
+
+def test_run_log_redacts_configured_key_echo(tmp_path, ontology, chunk, monkeypatch):
+    # Even a key shape no pattern knows is masked when it is the key
+    # configured in this process: the exact value is hidden anywhere a
+    # provider echoes it back.
+    secret = 'unusual-key-format-987654321'
+    monkeypatch.setenv('OPENROUTER_API_KEY', secret)
+    detail = 'provider rejected ' + secret + ' as invalid'
+    primary = FakeProvider([CallFailure('http_failure', 401, detail=detail)])
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, None, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, None, sleep=lambda seconds: None)
+    p.run(10, 100, True, False)
+    text = (job / 'run-log.jsonl').read_text(encoding='utf-8')
+    assert secret not in text
+    assert '[redacted-key]' in text
+
+
+def test_run_log_records_unexpected_failure(tmp_path, ontology, chunk):
+    # An unexpected error inside a call still leaves a run_failed line, so
+    # the log shows the attempt started and the run died, instead of the
+    # run stopping silently.
+    primary = FakeProvider([RuntimeError('something broke sk-or-v1-abcdef123456')])
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, None, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, None, sleep=lambda seconds: None)
+    with pytest.raises(RuntimeError):
+        p.run(10, 100, True, False)
+    events = read_run_log(job)
+    started = [event for event in events if event['event'] == 'attempt_started']
+    assert len(started) == 1
+    failed = [event for event in events if event['event'] == 'run_failed']
+    assert len(failed) == 1
+    assert failed[0]['error_type'] == 'RuntimeError'
+    assert 'something broke' in failed[0]['message']
+    assert 'sk-or-v1-abcdef123456' not in failed[0]['message']
+
+
+def test_attempt_result_file_redacts_provider_detail(tmp_path, ontology, chunk):
+    # The saved attempt evidence masks key-shaped text too, not only the
+    # run log.
+    primary = FakeProvider([CallFailure('http_failure', 401, detail='bad key sk-or-v1-abcdef123456')])
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, None, policy=retry_policy(0))
+    p = Pipeline(job, ontology, primary, None, sleep=lambda seconds: None)
+    p.run(10, 100, True, False)
+    saved = (job / 'attempt-1-result.json').read_text(encoding='utf-8')
+    assert 'sk-or-v1-abcdef123456' not in saved
+    assert '[redacted-key]' in saved
+
+
+def test_live_shaped_fallback_without_published_tpm(tmp_path, ontology, chunk, payload_data, monkeypatch):
+    # OpenRouter publishes a request-per-minute cap but no token-per-minute
+    # cap for :free models: the run accepts a missing fallback TPM and paces
+    # that provider on requests alone. The primary keeps its verified TPM.
+    monkeypatch.setenv('GEMINI_API_KEY', 'offline-not-a-key')
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'offline-not-a-key')
+
+    class LiveShapedProvider(FakeProvider):
+        def __init__(self, values, provider):
+            super().__init__(values, provider)
+            self.recipe = {'provider': provider, 'model': 'explicit-model', 'max_output_tokens': 100,
+                           'api_version': 'structured-v3-generate-content'}
+
+        def ready(self):
+            pass
+
+    primary = LiveShapedProvider([CallFailure('http_failure', 429)], 'gemini')
+    fallback = LiveShapedProvider([json.dumps(payload_data)], 'openrouter')
+    pricing = {'gemini': pricing_for(input_rate='0', output_rate='0'),
+               'openrouter': pricing_for(input_rate='0', output_rate='0')}
+    for entry in pricing.values():
+        entry['free_tier_no_billing_verified'] = True
+    limits = {'authority_reference': 'offline-test-not-user-authority', 'total_usd': '0',
+              'documents': {chunk['document_hash']: '0'}}
+    job = tmp_path / 'job'
+    prepare(job, [chunk], ontology, primary.recipe, fallback.recipe,
+            policy=retry_policy(0), pricing=pricing, cost_limits=limits)
+    p = Pipeline(job, ontology, primary, fallback, sleep=lambda seconds: None)
+    p.run(10, 15, True, True, tokens_per_minute=250000,
+          provider_limits={'gemini': {'rpm': 15, 'tpm': 250000},
+                           'openrouter': {'rpm': 20, 'tpm': None}})
+    assert primary.calls == 1 and fallback.calls == 1
+    events = read_run_log(job)
+    switches = [event for event in events if event['event'] == 'fallback_switched']
+    assert len(switches) == 1 and switches[0]['to_provider'] == 'openrouter'
