@@ -1,0 +1,288 @@
+{
+  "purpose": "Frozen few-shot examples for the golden-20 extraction prompt (golden-fewshot-v4). Example chunks are excluded from the golden-20 evaluation set, so examples never leak into scoring.",
+  "frozen": true,
+  "examples": [
+    {
+      "chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+      "text": "Each of the terms the \"Company\" and \"Apple\" as used herein refers collectively to Apple Inc. and its wholly owned subsidiaries, unless otherwise stated. PART I Item 1. Business Company Background The Company designs, manufactures and markets smartphones, personal computers, tablets, wearables and accessories, and sells a variety of related services. The Company's fiscal year is the 52- or 53-week period that ends on the last Saturday of September. Products iPhone iPhone is the Company's line of smartphones based on its iOS operating system. The iPhone line includes iPhone 15 Pro, iPhone 15, iPhone 14, iPhone 13 and iPhone SE . Mac Mac is the Company's line of personal computers based on its macOS operating system. The Mac line includes laptops MacBook Air and MacBook Pro , as well as desktops iMac , Mac mini , Mac Studio and Mac Pro . iPad iPad is the Company's line of multipurpose tablets based on its iPadOS operating system. The iPad line includes iPad Pro , iPad Air , iPad and iPad mini .",
+      "output": {
+        "entities": [
+          {
+            "canonical_name": "Apple Inc.",
+            "entity_type": "Company",
+            "aliases": [
+              "Apple",
+              "the Company"
+            ],
+            "description": "Apple Inc. and its wholly owned subsidiaries; the Company designs, manufactures and markets smartphones, personal computers, tablets, wearables and accessories, and sells a variety of related services.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+            "confidence": 0.99,
+            "evidence": "the \"Company\" and \"Apple\" as used herein refers collectively to Apple Inc. and its wholly owned subsidiaries"
+          },
+          {
+            "canonical_name": "iPhone",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "The Company's line of smartphones based on its iOS operating system; the line includes iPhone 15 Pro, iPhone 15, iPhone 14, iPhone 13 and iPhone SE.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+            "confidence": 0.98,
+            "evidence": "iPhone is the Company's line of smartphones based on its iOS operating system."
+          },
+          {
+            "canonical_name": "Mac",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "The Company's line of personal computers based on its macOS operating system.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+            "confidence": 0.98,
+            "evidence": "Mac is the Company's line of personal computers based on its macOS operating system."
+          },
+          {
+            "canonical_name": "iPad",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "The Company's line of multipurpose tablets based on its iPadOS operating system.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+            "confidence": 0.98,
+            "evidence": "iPad is the Company's line of multipurpose tablets based on its iPadOS operating system."
+          },
+          {
+            "canonical_name": "iOS",
+            "entity_type": "Technology",
+            "aliases": [],
+            "description": "Apple's operating system for the iPhone line of smartphones.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+            "confidence": 0.97,
+            "evidence": "based on its iOS operating system"
+          },
+          {
+            "canonical_name": "macOS",
+            "entity_type": "Technology",
+            "aliases": [],
+            "description": "Apple's operating system for the Mac line of personal computers.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+            "confidence": 0.97,
+            "evidence": "based on its macOS operating system"
+          },
+          {
+            "canonical_name": "iPadOS",
+            "entity_type": "Technology",
+            "aliases": [],
+            "description": "Apple's operating system for the iPad line of tablets.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+            "confidence": 0.97,
+            "evidence": "based on its iPadOS operating system"
+          }
+        ],
+        "relationships": [
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "iPhone",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+            "confidence": 0.9,
+            "evidence": "iPhone is the Company's line of smartphones based on its iOS operating system."
+          },
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "Mac",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+            "confidence": 0.9,
+            "evidence": "Mac is the Company's line of personal computers based on its macOS operating system."
+          },
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "iPad",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-products-000",
+            "confidence": 0.9,
+            "evidence": "iPad is the Company's line of multipurpose tablets based on its iPadOS operating system."
+          }
+        ]
+      },
+      "reviewed": true,
+      "reviewer": "instinct-agent source review 2026-11-26; names and relationships match the reviewed labels in tests/fixtures/labels-positive-sample.json exactly; evidence quotes verified verbatim against the source text",
+      "user_confirmed": false,
+      "source_label_file": "tests/fixtures/labels-positive-sample.json"
+    },
+    {
+      "chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-competition-001",
+      "text": "Competition The markets for the Company's products and services are highly competitive, and are characterized by aggressive price competition and resulting downward pressure on gross margins, frequent introduction of new products and services, short product life cycles, evolving industry standards, continual improvement in product price and performance characteristics, rapid adoption of technological advancements by competitors, and price sensitivity on the part of consumers and businesses. Many of the Company's competitors seek to compete primarily through aggressive pricing and very low cost structures, and by imitating the Company's products and infringing on its intellectual property. Apple Inc. | 2023 Form 10-K | 2 The Company's ability to compete successfully depends heavily on ensuring the continuing and timely introduction of innovative new products, services and technologies to the marketplace. The Company designs and develops nearly the entire solution for its products, including the hardware, operating system, numerous software applications and related services.",
+      "output": {
+        "entities": [
+          {
+            "canonical_name": "Apple Inc.",
+            "entity_type": "Company",
+            "aliases": [
+              "the Company"
+            ],
+            "description": "The Company faces highly competitive markets for its products and services and designs and develops nearly the entire solution for its products.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-competition-001",
+            "confidence": 0.9,
+            "evidence": "Apple Inc. | 2023 Form 10-K | 2"
+          }
+        ],
+        "relationships": []
+      },
+      "reviewed": true,
+      "reviewer": "instinct-agent source review 2026-11-26; names and relationships match the reviewed labels in tests/fixtures/labels-positive-sample.json exactly; evidence quotes verified verbatim against the source text",
+      "user_confirmed": false,
+      "source_label_file": "tests/fixtures/labels-positive-sample.json"
+    },
+    {
+      "chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+      "text": "Wearables, Home and Accessories Wearables includes smartwatches and wireless headphones. The Company's line of smartwatches, based on its watchOS operating system, includes Apple Watch Ultra 2, Apple Watch Series 9 and Apple Watch SE . The Company's line of wireless headphones includes AirPods , AirPods Pro , AirPods Max and Beats products. Home includes Apple TV , the Company's media streaming and gaming device based on its tvOS operating system, and HomePod and HomePod mini , high-fidelity wireless smart speakers. Accessories includes Apple-branded and third-party accessories. Apple Inc. | 2023 Form 10-K | 1 Services Advertising The Company's advertising services include third-party licensing arrangements and the Company's own advertising platforms. AppleCare The Company offers a portfolio of fee-based service and support products under the AppleCare brand. The offerings provide priority access to Apple technical support, access to the global Apple authorized service network for repair and replacement services, and in many cases additional coverage for instances of accidental damage or theft and loss, depending on the country and type of product. Cloud Services The Company's cloud services store and keep customers' content up-to-date and available across multiple Apple devices and Windows personal computers. Digital Content The Company operates various platforms, including the App Store , that allow customers to discover and download applications and digital content, such as books, music, video, games and podcasts. The Company also offers digital content through subscription-based services, including Apple Arcade , a game subscription service; Apple Fitness+ SM , a personalized fitness service; Apple Music , which offers users a curated listening experience with on-demand radio stations; Apple News+ , a subscription news and magazine service; and Apple TV+ , which offers exclusive original content and live sports.",
+      "output": {
+        "entities": [
+          {
+            "canonical_name": "Apple Inc.",
+            "entity_type": "Company",
+            "aliases": [
+              "the Company"
+            ],
+            "description": "The Company offers wearables, home and accessories products and a range of services including advertising, AppleCare, cloud services and digital content.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.9,
+            "evidence": "Apple Inc. | 2023 Form 10-K | 1"
+          },
+          {
+            "canonical_name": "Apple Watch",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "The Company's line of smartwatches, based on its watchOS operating system.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.97,
+            "evidence": "line of smartwatches, based on its watchOS operating system, includes Apple Watch Ultra 2"
+          },
+          {
+            "canonical_name": "AirPods",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "The Company's line of wireless headphones.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.97,
+            "evidence": "line of wireless headphones includes AirPods"
+          },
+          {
+            "canonical_name": "HomePod",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "High-fidelity wireless smart speakers.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.96,
+            "evidence": "HomePod and HomePod mini , high-fidelity wireless smart speakers."
+          },
+          {
+            "canonical_name": "Apple TV",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "The Company's media streaming and gaming device based on its tvOS operating system.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.97,
+            "evidence": "Apple TV , the Company's media streaming and gaming device based on its tvOS operating system"
+          },
+          {
+            "canonical_name": "watchOS",
+            "entity_type": "Technology",
+            "aliases": [],
+            "description": "Apple's operating system for its line of smartwatches.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.96,
+            "evidence": "based on its watchOS operating system"
+          },
+          {
+            "canonical_name": "tvOS",
+            "entity_type": "Technology",
+            "aliases": [],
+            "description": "Apple's operating system for its media streaming and gaming device.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.96,
+            "evidence": "based on its tvOS operating system"
+          },
+          {
+            "canonical_name": "App Store",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "A platform the Company operates that lets customers discover and download applications and digital content.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.95,
+            "evidence": "operates various platforms, including the App Store"
+          },
+          {
+            "canonical_name": "Apple Music",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "A service that offers users a curated listening experience with on-demand radio stations.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.95,
+            "evidence": "Apple Music , which offers users a curated listening experience with on-demand radio stations"
+          },
+          {
+            "canonical_name": "Apple TV+",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "A subscription-based service that offers exclusive original content and live sports.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.95,
+            "evidence": "Apple TV+ , which offers exclusive original content and live sports"
+          }
+        ],
+        "relationships": [
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "Apple Watch",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.9,
+            "evidence": "line of smartwatches, based on its watchOS operating system, includes Apple Watch Ultra 2"
+          },
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "AirPods",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.9,
+            "evidence": "line of wireless headphones includes AirPods"
+          },
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "Apple TV",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.9,
+            "evidence": "Apple TV , the Company's media streaming and gaming device based on its tvOS operating system"
+          },
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "App Store",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.9,
+            "evidence": "operates various platforms, including the App Store"
+          },
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "Apple Music",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.9,
+            "evidence": "Apple Music , which offers users a curated listening experience with on-demand radio stations"
+          },
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "Apple TV+",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.9,
+            "evidence": "Apple TV+ , which offers exclusive original content and live sports"
+          }
+        ]
+      },
+      "reviewed": true,
+      "reviewer": "instinct-agent source review 2026-11-26; names and relationships match the reviewed labels in tests/fixtures/labels-positive-sample.json exactly; evidence quotes verified verbatim against the source text",
+      "user_confirmed": false,
+      "source_label_file": "tests/fixtures/labels-positive-sample.json"
+    }
+  ]
+}

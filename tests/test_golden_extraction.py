@@ -1,0 +1,273 @@
+"""Golden-20 evaluation pieces: offline shape tests only, no network calls.
+
+These prove the prompt template, the metrics honesty rules and the runner's
+file behavior. Live model quality and free-tier status are verified
+separately before any real run.
+"""
+import json
+from pathlib import Path
+
+import pytest
+
+from app.extraction import chunk_metrics
+from app.extraction.golden_prompt import (GOLDEN_PROMPT_V4, GOLDEN_PROMPT_VERSION,
+                                          build_golden_prompt)
+from app.extraction.golden_openrouter import (GoldenCallError, complete,
+                                              request_body)
+from app.graph.ontology import load_ontology
+from scripts import build_golden_set
+from scripts.run_golden_extraction import run
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def ontology():
+    return load_ontology(ROOT / 'configs' / 'ontology.json')
+
+
+@pytest.fixture
+def examples():
+    document = json.loads(
+        (ROOT / 'configs' / 'golden_fewshot_examples.json').read_text(encoding='utf-8'))
+    return document['examples']
+
+
+def full_usage():
+    return {'prompt_tokens': 1200, 'completion_tokens': 300,
+            'prompt_tokens_details': {'cached_tokens': 0},
+            'completion_tokens_details': {'reasoning_tokens': 0},
+            'cost': 0.0}
+
+
+def fake_response(text, usage=None):
+    return {'text': text, 'usage': usage if usage is not None else full_usage(),
+            'provider': 'TestUpstream', 'openrouter_metadata': None,
+            'http_status': 200, 'latency_ms': 12.5}
+
+
+# --- prompt ---------------------------------------------------------------
+
+def test_template_is_one_readable_string_with_marked_slots():
+    assert isinstance(GOLDEN_PROMPT_V4, str)
+    assert '<<<RULES>>>' in GOLDEN_PROMPT_V4
+    assert '<<<EXAMPLES>>>' in GOLDEN_PROMPT_V4
+    assert '<<<SOURCE_TEXT>>>' in GOLDEN_PROMPT_V4
+    assert 'SOURCE TEXT:' in GOLDEN_PROMPT_V4
+
+
+def test_prompt_fills_slots_and_keeps_examples(ontology, examples):
+    chunk = {'chunk_id': 'c-golden-1', 'text': 'Acme develops the Widget platform.'}
+    prompt = build_golden_prompt(chunk, ontology, examples)
+    assert '<<<' not in prompt
+    assert 'c-golden-1' in prompt
+    assert 'Acme develops the Widget platform.' in prompt
+    for example in examples:
+        assert example['text'][:80] in prompt
+        assert example['chunk_id'] in prompt
+    assert 'RULES:' in prompt
+
+
+def test_prompt_requires_examples(ontology):
+    with pytest.raises(ValueError):
+        build_golden_prompt({'chunk_id': 'c1', 'text': 'x'}, ontology, [])
+
+
+def test_fewshot_examples_match_schema_shape(ontology, examples):
+    from app.extraction.contracts import check_source_contract, ontology_contract
+    contract = ontology_contract(ontology)
+    for example in examples:
+        payload = contract.model_validate_json(json.dumps(example['output']))
+        chunk = {'chunk_id': example['chunk_id'], 'text': example['text']}
+        checks = check_source_contract(payload, chunk, ontology)
+        assert checks['mechanical_checks_pass'], checks['problems']
+
+
+# --- metrics ---------------------------------------------------------------
+
+def test_metrics_row_keeps_reported_values():
+    row = chunk_metrics.record_row('c1', 'm:free', fake_response('{}'), True, 3, 1, 12.5)
+    assert row['prompt_tokens'] == 1200
+    assert row['cached_tokens'] == 0
+    assert row['cost_usd'] == 0.0
+    assert row['served_provider'] == 'TestUpstream'
+    assert row['schema_valid'] is True
+
+
+def test_metrics_missing_fields_become_unavailable_and_fail_verification(tmp_path):
+    response = fake_response('{}', usage={'prompt_tokens': 10})
+    log = tmp_path / 'metrics.jsonl'
+    chunk_metrics.append_row(log, chunk_metrics.record_row(
+        'c1', 'm:free', response, True, 1, 0, 5.0))
+    problems = chunk_metrics.verify_log(log)
+    assert any('completion_tokens' in problem for problem in problems)
+    assert any('cached_tokens' in problem for problem in problems)
+    assert any('cost_usd' in problem for problem in problems)
+    row = chunk_metrics.read_rows(log)[0]
+    assert row['cost_usd'] == 'unavailable'
+
+
+def test_metrics_verification_passes_on_full_reporting(tmp_path):
+    log = tmp_path / 'metrics.jsonl'
+    chunk_metrics.append_row(log, chunk_metrics.record_row(
+        'c1', 'm:free', fake_response('{}'), True, 2, 1, 9.0))
+    assert chunk_metrics.verify_log(log) == []
+
+
+def test_metrics_verification_flags_schema_failure(tmp_path):
+    log = tmp_path / 'metrics.jsonl'
+    chunk_metrics.append_row(log, chunk_metrics.record_row(
+        'c1', 'm:free', fake_response('not json'), False, 'unavailable',
+        'unavailable', 9.0, error='schema validation failed'))
+    problems = chunk_metrics.verify_log(log)
+    assert any('schema_valid=false' in problem for problem in problems)
+
+
+# --- transport shape ---------------------------------------------------------
+
+def test_request_body_is_strict_schema_with_routing_and_reasoning_off():
+    body = request_body('vendor/model:free', 'prompt', {'type': 'object'}, 4096,
+                        {'effort': 'none'})
+    assert body['model'] == 'vendor/model:free'
+    assert body['temperature'] == 0
+    assert body['reasoning'] == {'effort': 'none'}
+    assert body['response_format']['json_schema']['strict'] is True
+    assert body['provider']['require_parameters'] is True
+
+
+def test_complete_missing_key_never_sends():
+    with pytest.raises(GoldenCallError):
+        complete('m:free', 'p', {}, max_output_tokens=100, api_key='  ')
+
+
+# --- runner, fully offline ---------------------------------------------------
+
+def write_config(tmp_path, chunks_document):
+    chunks_path = tmp_path / 'chunks.json'
+    chunks_path.write_text(json.dumps(chunks_document), encoding='utf-8')
+    config = {
+        'models': {'fake': 'fake/model:free'},
+        'active_model': 'fake',
+        'reasoning': {'effort': 'none'},
+        'max_output_tokens': 4096,
+        'chunks_path': str(chunks_path),
+        'fewshot_path': str(ROOT / 'configs' / 'golden_fewshot_examples.json'),
+        'ontology_path': str(ROOT / 'configs' / 'ontology.json'),
+        'reports_dir': str(tmp_path / 'reports'),
+        'chunk_limit': None,
+    }
+    config_path = tmp_path / 'config.json'
+    config_path.write_text(json.dumps(config), encoding='utf-8')
+    return config_path
+
+
+def valid_payload_json(chunk_id):
+    return json.dumps({
+        'entities': [{'canonical_name': 'Acme', 'entity_type': 'Company',
+                      'aliases': [], 'description': 'Acme develops the Widget platform.',
+                      'source_chunk_id': chunk_id, 'confidence': 0.9,
+                      'evidence': 'Acme develops the Widget platform.'}],
+        'relationships': []})
+
+
+def test_runner_offline_happy_path(tmp_path):
+    chunks = [{'chunk_id': 'c1', 'text': 'Acme develops the Widget platform.'},
+              {'chunk_id': 'c2', 'text': 'Acme develops the Widget platform.'}]
+    config_path = write_config(tmp_path, chunks)
+
+    def completer(prompt):
+        chunk_id = 'c1' if prompt.rstrip().endswith('platform.') and 'c1' in prompt else 'c2'
+        return fake_response(valid_payload_json(chunk_id))
+
+    assert run(config_path, completer=completer) == 0
+    run_folders = list((tmp_path / 'reports').iterdir())
+    assert len(run_folders) == 1
+    rows = chunk_metrics.read_rows(run_folders[0] / 'metrics.jsonl')
+    assert [row['chunk_id'] for row in rows] == ['c1', 'c2']
+    assert all(row['schema_valid'] for row in rows)
+    results = json.loads((run_folders[0] / 'results.json').read_text(encoding='utf-8'))
+    assert results['summary']['chunks_ok'] == 2
+    assert results['summary']['prompt_version'] == GOLDEN_PROMPT_VERSION
+
+
+def test_runner_fails_verification_when_usage_missing(tmp_path):
+    chunks = [{'chunk_id': 'c1', 'text': 'Acme develops the Widget platform.'}]
+    config_path = write_config(tmp_path, chunks)
+
+    def completer(prompt):
+        response = fake_response(valid_payload_json('c1'), usage={'prompt_tokens': 10})
+        return response
+
+    assert run(config_path, completer=completer) == 1
+
+
+def test_runner_stops_all_calls_on_429(tmp_path):
+    chunks = [{'chunk_id': 'c1', 'text': 'one'}, {'chunk_id': 'c2', 'text': 'two'}]
+    config_path = write_config(tmp_path, chunks)
+    calls = []
+
+    def completer(prompt):
+        calls.append(prompt)
+        raise GoldenCallError(429, 'rate limited', retry_after=None)
+
+    assert run(config_path, completer=completer) == 1
+    assert len(calls) == 1
+
+
+def test_runner_chunk_limit(tmp_path):
+    chunks = [{'chunk_id': 'c' + str(i), 'text': 'Acme develops the Widget platform.'}
+              for i in range(3)]
+    config_path = write_config(tmp_path, chunks)
+    config = json.loads(config_path.read_text(encoding='utf-8'))
+    config['chunk_limit'] = 2
+    config_path.write_text(json.dumps(config), encoding='utf-8')
+    calls = []
+
+    def completer(prompt):
+        calls.append(prompt)
+        marker = prompt.split('source_chunk_id is ')[1].split('.')[0]
+        return fake_response(valid_payload_json(marker))
+
+    assert run(config_path, completer=completer) == 0
+    assert len(calls) == 2
+
+
+# --- golden set curation -------------------------------------------------------
+
+def synthetic_chunk(chunk_id, ticker, accession, item_id, est_tokens, text,
+                    is_table=False, filed='2024-11-01', form='10-K'):
+    return {'chunk_id': chunk_id, 'ticker': ticker, 'form': form,
+            'accession': accession, 'item_id': item_id, 'period': '2024',
+            'filed': filed, 'is_table': is_table, 'est_tokens': est_tokens,
+            'text': text}
+
+
+def test_category_rules():
+    assert build_golden_set.category_of(
+        synthetic_chunk('a', 'T', 'A1', '1', 100, 'plain prose')) == 'clean'
+    assert build_golden_set.category_of(
+        synthetic_chunk('b', 'T', 'A1', '1', 900, 'long prose')) == 'dense'
+    assert build_golden_set.category_of(
+        synthetic_chunk('c', 'T', 'A1', '1A', 50, 'x', is_table=True)) == 'messy'
+    assert build_golden_set.category_of(
+        synthetic_chunk('d', 'T', 'A1', '7', 50,
+                        'This contains forward-looking statements.')) == 'boilerplate'
+
+
+def test_matches_rule_filters_form_year_and_item():
+    good = synthetic_chunk('a', 'T', 'A1', '1A', 100, 'text')
+    assert build_golden_set.matches_rule(good)
+    assert not build_golden_set.matches_rule(
+        synthetic_chunk('b', 'T', 'A1', '1A', 100, 'text', form='8-K'))
+    assert not build_golden_set.matches_rule(
+        synthetic_chunk('c', 'T', 'A1', '1A', 100, 'text', filed='2019-01-01'))
+    assert not build_golden_set.matches_rule(
+        synthetic_chunk('d', 'T', 'A1', '8', 100, 'text'))
+
+
+def test_spread_pick_rotates_across_filings():
+    candidates = [synthetic_chunk('a1', 'T', 'A1', '1', 100, 'x'),
+                  synthetic_chunk('a2', 'T', 'A1', '1', 100, 'x'),
+                  synthetic_chunk('b1', 'U', 'B1', '1', 100, 'x')]
+    picked = build_golden_set.spread_pick(candidates, 2)
+    assert {chunk['accession'] for chunk in picked} == {'A1', 'B1'}
