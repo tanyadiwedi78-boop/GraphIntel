@@ -41,7 +41,7 @@ sys.path.insert(0, str(PROJECT_FOLDER))
 
 from app.extraction import chunk_metrics
 from app.extraction.contracts import check_source_contract, ontology_contract
-from app.extraction.golden_openrouter import GoldenCallError, complete
+from app.extraction.golden_openrouter import GoldenCallError, OpenRouterClient
 from app.extraction.golden_prompt import GOLDEN_PROMPT_VERSION, build_golden_prompt
 from app.graph.ontology import load_ontology
 
@@ -77,117 +77,147 @@ def fresh_run_folder(reports_dir: Path, model_id: str) -> Path:
     return folder
 
 
-def run(config_path: Path = CONFIG_PATH, completer=None) -> int:
-    config = load_config(config_path)
-    model_id = config['models'][config['active_model']]
-    ontology = load_ontology(PROJECT_FOLDER / config['ontology_path'])
-    contract = ontology_contract(ontology)
-    schema = contract.model_json_schema()
+class GoldenRun:
+    """One evaluation run: shared settings in one place, one method per step."""
 
-    fewshot_document = json.loads(
-        (PROJECT_FOLDER / config['fewshot_path']).read_text(encoding='utf-8'))
-    examples = fewshot_document['examples']
+    def __init__(self, config: dict, completer=None) -> None:
+        self.config = config
+        self.model_id = config['models'][config['active_model']]
+        self.ontology = load_ontology(PROJECT_FOLDER / config['ontology_path'])
+        self.contract = ontology_contract(self.ontology)
+        self.schema = self.contract.model_json_schema()
+        self.examples = self.load_examples()
+        self.completer = completer
+        self.results = []
+        self.stopped_early = False
 
-    chunks = load_chunks(PROJECT_FOLDER / config['chunks_path'])
-    limit = config.get('chunk_limit')
-    if isinstance(limit, int) and limit > 0:
-        chunks = chunks[:limit]
-    if not chunks:
-        print('No chunks to run. Check chunks_path in ' + str(config_path))
-        return 2
+    def load_examples(self) -> list:
+        path = PROJECT_FOLDER / self.config['fewshot_path']
+        return json.loads(path.read_text(encoding='utf-8'))['examples']
 
-    run_folder = fresh_run_folder(PROJECT_FOLDER / config['reports_dir'], model_id)
-    metrics_path = run_folder / 'metrics.jsonl'
-    results_path = run_folder / 'results.json'
+    def select_chunks(self) -> list:
+        chunks = load_chunks(PROJECT_FOLDER / self.config['chunks_path'])
+        limit = self.config.get('chunk_limit')
+        if isinstance(limit, int) and limit > 0:
+            chunks = chunks[:limit]
+        return chunks
 
-    if completer is None:
+    def ensure_completer(self) -> bool:
+        """Build the live client unless a test already supplied a completer."""
+        if self.completer is not None:
+            return True
         api_key = os.environ.get('OPENROUTER_API_KEY', '').strip()
         if not api_key:
             print('OPENROUTER_API_KEY is not set; no request sent.')
             print('Set it from your .env first, then rerun.')
-            return 2
+            return False
+        client = OpenRouterClient(self.model_id, api_key,
+                                  self.config['max_output_tokens'],
+                                  reasoning=self.config.get('reasoning'))
+        self.completer = lambda prompt: client.complete(prompt, self.schema)
+        return True
 
-        def completer(prompt):
-            return complete(model_id, prompt, schema,
-                            max_output_tokens=config['max_output_tokens'],
-                            api_key=api_key,
-                            reasoning=config.get('reasoning'))
-
-    results = []
-    stopped_early = False
-    for chunk in chunks:
-        chunk_id = str(chunk['chunk_id'])
-        prompt = build_golden_prompt(chunk, ontology, examples)
+    def validate(self, raw_text, chunk):
+        """Return (payload or None, list of problems)."""
+        if not raw_text:
+            return None, ['empty or unusable response text']
         try:
-            response = completer(prompt)
-        except GoldenCallError as error:
-            row = chunk_metrics.record_row(chunk_id, model_id, None, False,
-                                           'unavailable', 'unavailable',
-                                           'unavailable',
-                                           error='http ' + str(error.status))
-            chunk_metrics.append_row(metrics_path, row)
-            results.append({'chunk_id': chunk_id, 'ok': False,
-                            'error': 'http ' + str(error.status)})
-            if error.status in STOP_STATUSES:
-                print('Stop: the provider answered HTTP ' + str(error.status)
-                      + ' on chunk ' + chunk_id + '.')
-                print('No more live calls this run. The saved rows show how far it got.')
-                stopped_early = True
-                break
-            print('Chunk ' + chunk_id + ' failed (HTTP ' + str(error.status)
-                  + '); recorded, moving on.')
-            continue
+            payload = self.contract.model_validate_json(raw_text)
+        except ValueError as error:
+            return None, ['schema validation failed: ' + str(error)[:200]]
+        checks = check_source_contract(payload, chunk, self.ontology)
+        return payload, checks['problems']
 
+    def record_failure(self, metrics_path: Path, chunk_id: str, error: GoldenCallError) -> None:
+        label = 'http ' + str(error.status)
+        row = chunk_metrics.record_row(chunk_id, self.model_id, None, False,
+                                       'unavailable', 'unavailable', 'unavailable',
+                                       error=label)
+        chunk_metrics.append_row(metrics_path, row)
+        self.results.append({'chunk_id': chunk_id, 'ok': False, 'error': label})
+
+    def record_answer(self, metrics_path: Path, chunk: dict, response: dict) -> None:
+        chunk_id = str(chunk['chunk_id'])
         raw_text = response.get('text')
-        payload = None
-        problems = ['empty or unusable response text']
-        if raw_text:
-            try:
-                payload = contract.model_validate_json(raw_text)
-                checks = check_source_contract(payload, chunk, ontology)
-                problems = checks['problems']
-            except ValueError as error:
-                problems = ['schema validation failed: ' + str(error)[:200]]
-
+        payload, problems = self.validate(raw_text, chunk)
         ok = payload is not None and not problems
         row = chunk_metrics.record_row(
-            chunk_id, model_id, response, ok,
+            chunk_id, self.model_id, response, ok,
             len(payload.entities) if payload else 'unavailable',
             len(payload.relationships) if payload else 'unavailable',
             response.get('latency_ms'),
             error=None if ok else '; '.join(problems)[:200])
         chunk_metrics.append_row(metrics_path, row)
-        results.append({'chunk_id': chunk_id, 'ok': ok, 'problems': problems,
-                        'payload': json.loads(raw_text) if payload else None,
-                        'raw_text': None if payload else raw_text})
+        self.results.append({'chunk_id': chunk_id, 'ok': ok, 'problems': problems,
+                             'payload': json.loads(raw_text) if payload else None,
+                             'raw_text': None if payload else raw_text})
 
-    summary = {
-        'model': model_id,
-        'prompt_version': GOLDEN_PROMPT_VERSION,
-        'chunks_attempted': len(results),
-        'chunks_ok': sum(1 for item in results if item['ok']),
-        'stopped_early': stopped_early,
-        'created_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
-        'note': 'Schema pass means shape, ontology and provenance checks passed. '
-                'It is not an accuracy claim; accuracy comes from scoring these '
-                'answers against reviewed labels.',
-    }
-    results_path.write_text(json.dumps({'summary': summary, 'results': results},
-                                       indent=2) + '\n', encoding='utf-8')
+    def run_chunk(self, metrics_path: Path, chunk: dict) -> None:
+        chunk_id = str(chunk['chunk_id'])
+        prompt = build_golden_prompt(chunk, self.ontology, self.examples)
+        try:
+            response = self.completer(prompt)
+        except GoldenCallError as error:
+            self.record_failure(metrics_path, chunk_id, error)
+            if error.status in STOP_STATUSES:
+                print('Stop: the provider answered HTTP ' + str(error.status)
+                      + ' on chunk ' + chunk_id + '.')
+                print('No more live calls this run. The saved rows show how far it got.')
+                self.stopped_early = True
+            else:
+                print('Chunk ' + chunk_id + ' failed (HTTP ' + str(error.status)
+                      + '); recorded, moving on.')
+            return
+        self.record_answer(metrics_path, chunk, response)
 
-    print('Run saved under ' + str(run_folder))
-    print('Chunks ok: ' + str(summary['chunks_ok']) + ' of '
-          + str(summary['chunks_attempted']))
+    def summary(self) -> dict:
+        return {
+            'model': self.model_id,
+            'prompt_version': GOLDEN_PROMPT_VERSION,
+            'chunks_attempted': len(self.results),
+            'chunks_ok': sum(1 for item in self.results if item['ok']),
+            'stopped_early': self.stopped_early,
+            'created_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            'note': 'Schema pass means shape, ontology and provenance checks passed. '
+                    'It is not an accuracy claim; accuracy comes from scoring these '
+                    'answers against reviewed labels.',
+        }
 
-    problems = chunk_metrics.verify_log(metrics_path)
-    if problems:
-        print('METRICS VERIFICATION FAILED - ' + str(len(problems)) + ' problem(s):')
-        for problem in problems:
-            print('  ' + problem)
-        print('Fields the provider did not report stay "unavailable"; they are never filled in.')
-        return 1
-    print('Metrics verification passed: every usage and cost field was reported.')
-    return 0
+    def execute(self) -> int:
+        chunks = self.select_chunks()
+        if not chunks:
+            print('No chunks to run. Check chunks_path in the config.')
+            return 2
+        if not self.ensure_completer():
+            return 2
+        run_folder = fresh_run_folder(PROJECT_FOLDER / self.config['reports_dir'], self.model_id)
+        metrics_path = run_folder / 'metrics.jsonl'
+        for chunk in chunks:
+            self.run_chunk(metrics_path, chunk)
+            if self.stopped_early:
+                break
+        summary = self.summary()
+        (run_folder / 'results.json').write_text(
+            json.dumps({'summary': summary, 'results': self.results}, indent=2) + '\n',
+            encoding='utf-8')
+        print('Run saved under ' + str(run_folder))
+        print('Chunks ok: ' + str(summary['chunks_ok']) + ' of ' + str(summary['chunks_attempted']))
+        return self.report_verification(metrics_path)
+
+    def report_verification(self, metrics_path: Path) -> int:
+        problems = chunk_metrics.verify_log(metrics_path)
+        if problems:
+            print('METRICS VERIFICATION FAILED - ' + str(len(problems)) + ' problem(s):')
+            for problem in problems:
+                print('  ' + problem)
+            print('Fields the provider did not report stay "unavailable"; they are never filled in.')
+            return 1
+        print('Metrics verification passed: every usage and cost field was reported.')
+        return 0
+
+
+def run(config_path: Path = CONFIG_PATH, completer=None) -> int:
+    return GoldenRun(load_config(config_path), completer).execute()
 
 
 if __name__ == '__main__':

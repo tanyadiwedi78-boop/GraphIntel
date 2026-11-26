@@ -12,8 +12,7 @@ import pytest
 from app.extraction import chunk_metrics
 from app.extraction.golden_prompt import (GOLDEN_PROMPT_V4, GOLDEN_PROMPT_VERSION,
                                           build_golden_prompt)
-from app.extraction.golden_openrouter import (GoldenCallError, complete,
-                                              request_body)
+from app.extraction.golden_openrouter import GoldenCallError, OpenRouterClient
 from app.graph.ontology import load_ontology
 from scripts import build_golden_set
 from scripts.run_golden_extraction import run
@@ -126,8 +125,8 @@ def test_metrics_verification_flags_schema_failure(tmp_path):
 # --- transport shape ---------------------------------------------------------
 
 def test_request_body_is_strict_schema_with_routing_and_reasoning_off():
-    body = request_body('vendor/model:free', 'prompt', {'type': 'object'}, 4096,
-                        {'effort': 'none'})
+    client = OpenRouterClient('vendor/model:free', 'key', 4096, reasoning={'effort': 'none'})
+    body = client.request_body('prompt', {'type': 'object'})
     assert body['model'] == 'vendor/model:free'
     assert body['temperature'] == 0
     assert body['reasoning'] == {'effort': 'none'}
@@ -136,8 +135,16 @@ def test_request_body_is_strict_schema_with_routing_and_reasoning_off():
 
 
 def test_complete_missing_key_never_sends():
+    client = OpenRouterClient('m:free', '  ', 100)
     with pytest.raises(GoldenCallError):
-        complete('m:free', 'p', {}, max_output_tokens=100, api_key='  ')
+        client.complete('p', {})
+
+
+def test_request_carries_metadata_opt_in_and_bearer_key():
+    client = OpenRouterClient('m:free', ' secret ', 100)
+    request = client.build_request('p', {})
+    assert request.get_header('X-openrouter-metadata') == 'enabled'
+    assert request.get_header('Authorization') == 'Bearer secret'
 
 
 # --- runner, fully offline ---------------------------------------------------
