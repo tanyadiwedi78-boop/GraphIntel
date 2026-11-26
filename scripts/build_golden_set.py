@@ -58,6 +58,13 @@ COVER_MARKERS = ('united states securities and exchange commission',
 EXCLUDE_FILES = ['tests/fixtures/sample5-chunks.json',
                  'tests/fixtures/positive-sample-chunks.json']
 
+# Few-shot examples shown inside the prompt. A golden chunk that shares text
+# with an example would leak the answer into scoring, so candidates are also
+# excluded by text overlap, not only by chunk id.
+FEWSHOT_FILE = 'configs/golden_fewshot_examples.json'
+OVERLAP_WINDOW = 160
+OVERLAP_MIN = 80
+
 
 def read_chunks(path: Path) -> list:
     chunks = []
@@ -78,17 +85,28 @@ def filed_year(chunk: dict):
 
 
 def category_of(chunk: dict) -> str:
+    return category_with_reason(chunk)[0]
+
+
+def category_with_reason(chunk: dict) -> tuple:
+    """The assigned category plus the rule that fired, for human review.
+
+    Categories are heuristic starting points, not certified truth. The
+    reason string lets a reviewer confirm or relabel each chunk before the
+    set is scored; the manifest keeps both.
+    """
     text = str(chunk.get('text') or '').casefold()
     if chunk.get('is_table'):
-        return 'messy'
+        return 'messy', 'is_table is true'
     for marker in BOILERPLATE_MARKERS + COVER_MARKERS:
         if marker in text:
-            return 'boilerplate'
+            return 'boilerplate', 'text contains "' + marker + '"'
     tokens = chunk.get('est_tokens')
     if isinstance(tokens, (int, float)) and not isinstance(tokens, bool):
         if tokens >= DENSE_MIN_TOKENS:
-            return 'dense'
-    return 'clean'
+            return 'dense', 'est_tokens ' + str(tokens) + ' >= ' + str(DENSE_MIN_TOKENS)
+        return 'clean', 'no table, no boilerplate marker, est_tokens ' + str(tokens) + ' < ' + str(DENSE_MIN_TOKENS)
+    return 'clean', 'no table, no boilerplate marker, est_tokens missing'
 
 
 def matches_rule(chunk: dict) -> bool:
@@ -115,6 +133,54 @@ def excluded_ids() -> set:
         elif isinstance(data, list):
             excluded.update(str(item) for item in data)
     return excluded
+
+
+def squash(text: str) -> str:
+    return ' '.join(str(text).split())
+
+
+def example_texts() -> list:
+    """All few-shot example source texts, plus earlier sample chunk texts."""
+    texts = []
+    path = PROJECT_FOLDER / FEWSHOT_FILE
+    if path.exists():
+        document = json.loads(path.read_text(encoding='utf-8'))
+        for example in document.get('examples', []):
+            if example.get('text'):
+                texts.append(str(example['text']))
+    for relative in EXCLUDE_FILES:
+        fixture = PROJECT_FOLDER / relative
+        if not fixture.exists():
+            continue
+        data = json.loads(fixture.read_text(encoding='utf-8'))
+        if isinstance(data, dict):
+            for value in data.values():
+                if isinstance(value, str):
+                    texts.append(value)
+    return texts
+
+
+def overlaps_examples(text: str, examples: list) -> bool:
+    """True when a candidate shares a real text span with any example.
+
+    Few-shot examples are excerpts of real filings, so their chunk ids never
+    match corpus chunks even when the words do. Sliding windows of the
+    example text catch a candidate that contains the example inside it.
+    """
+    candidate = squash(text).casefold()
+    for example in examples:
+        source = squash(example).casefold()
+        if not source:
+            continue
+        if source in candidate or candidate in source:
+            return True
+        start = 0
+        while start + OVERLAP_MIN <= len(source):
+            window = source[start:start + OVERLAP_WINDOW]
+            if len(window) >= OVERLAP_MIN and window in candidate:
+                return True
+            start += OVERLAP_WINDOW // 2
+    return False
 
 
 def spread_pick(candidates: list, size: int) -> list:
@@ -147,11 +213,16 @@ def main() -> int:
         return 2
 
     excluded = excluded_ids()
+    examples = example_texts()
+    overlap_excluded = 0
     pool = []
     for chunk in read_chunks(CHUNKS_PATH):
         if not matches_rule(chunk):
             continue
         if str(chunk.get('chunk_id')) in excluded:
+            continue
+        if overlaps_examples(str(chunk.get('text') or ''), examples):
+            overlap_excluded += 1
             continue
         pool.append(chunk)
 
@@ -169,6 +240,7 @@ def main() -> int:
         for chunk in chosen:
             chunk = dict(chunk)
             chunk['golden_category'] = category
+            chunk['golden_category_reason'] = category_with_reason(chunk)[1]
             picked.append(chunk)
         missing = WANTED[category] - len(chosen)
         if missing:
@@ -190,6 +262,13 @@ def main() -> int:
         'requested_mix': WANTED,
         'shortfalls': shortfalls,
         'excluded_source_files': EXCLUDE_FILES,
+        'excluded_by_example_text_overlap': overlap_excluded,
+        'category_note': 'golden_category is assigned by the transparent rules in this '
+                         'script and recorded with its reason on every chunk; a human '
+                         'review pass confirms or relabels each one before scoring. '
+                         'Boilerplate chunks can still contain valid ontology entities; '
+                         'labels record what is truly there and an empty expected output '
+                         'is only used when review finds nothing extractable.',
         'created_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
         'chunks': picked,
     }

@@ -66,6 +66,11 @@ def complete(model: str, prompt: str, schema: Dict[str, Any], *,
     request = Request(url, data=json.dumps(body).encode(), method='POST', headers={
         'Content-Type': 'application/json',
         'Authorization': 'Bearer ' + api_key.strip(),
+        # Documented opt-in (default disabled) that puts routing metadata on the
+        # response as openrouter_metadata, so the metrics log can record the
+        # upstream provider that actually served the request.
+        # https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request
+        'X-OpenRouter-Metadata': 'enabled',
     })
     opener = opener or build_opener()
     started = time.monotonic()

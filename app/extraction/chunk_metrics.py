@@ -56,9 +56,17 @@ def _walk(mapping: Any, path: List[str]) -> Any:
 def served_provider_of(response: Dict[str, Any]) -> Any:
     """The upstream provider that actually served the request, when reported.
 
-    OpenRouter chat completions can carry it top-level as "provider" or inside
-    openrouter_metadata.endpoints.available entries flagged selected. Neither
-    is guaranteed on every response, so absence is UNAVAILABLE, not a guess.
+    Documented shape (https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request):
+    the response carries openrouter_metadata.endpoints.available, a list of
+    candidate endpoints where each entry has a provider name and a selected
+    flag. Entries with selected false were available or attempted; only the
+    entry with selected true actually served the request. The metadata block
+    appears only when the request opted in with the X-OpenRouter-Metadata:
+    enabled header, which golden_openrouter.complete always sends.
+
+    A top-level "provider" field shows up on some responses in practice but
+    is not in the documented response schema, so it is only a fallback here.
+    Absence is UNAVAILABLE, never a guess.
     """
     top = response.get('provider')
     if isinstance(top, str) and top.strip():

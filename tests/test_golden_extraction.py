@@ -254,6 +254,25 @@ def test_category_rules():
                         'This contains forward-looking statements.')) == 'boilerplate'
 
 
+def test_category_reason_is_recorded():
+    category, reason = build_golden_set.category_with_reason(
+        synthetic_chunk('a', 'T', 'A1', '1', 900, 'long prose'))
+    assert category == 'dense'
+    assert '900' in reason
+
+
+def test_overlaps_examples_catches_shared_spans():
+    example = ('The Company designs, manufactures and markets smartphones, '
+               'personal computers, tablets, wearables and accessories. ' * 4)
+    containing = 'Intro paragraph. ' + example + ' Trailing paragraph.'
+    assert build_golden_set.overlaps_examples(containing, [example])
+    disjoint = 'Entirely different filing text about logistics and freight.'
+    assert not build_golden_set.overlaps_examples(disjoint, [example])
+    short_example = 'Short boilerplate notice about forward-looking statements here.'
+    assert build_golden_set.overlaps_examples('Prefix ' + short_example + ' suffix',
+                                              [short_example])
+
+
 def test_matches_rule_filters_form_year_and_item():
     good = synthetic_chunk('a', 'T', 'A1', '1A', 100, 'text')
     assert build_golden_set.matches_rule(good)
