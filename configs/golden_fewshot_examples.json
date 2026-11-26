@@ -102,9 +102,9 @@
         ]
       },
       "reviewed": true,
-      "reviewer": "instinct-agent source review 2026-11-26; names and relationships match the reviewed labels in tests/fixtures/labels-positive-sample.json exactly; evidence quotes verified verbatim against the source text",
+      "reviewer": "instinct-agent semantic source review 2026-11-26: evidence quotes verbatim, each description supported by its own quote. Corrections from the fixture labels: services-002 adds HomePod and AppleCare edges/entity (HomePod was an entity without an edge; AppleCare is a service the Company offers) and Apple Inc. evidence is a substantive sentence, not a page footer; competition-001 description trimmed to what its footer evidence supports. Remaining uncertainty: competition-001 describes competitive pressure that arguably supports a Risk entity and FACES edge, left empty to stay conservative; no DEVELOPS edges for iOS/macOS/watchOS though the text says the Company designs and develops its operating systems only in the competition chunk. Not confirmed by the user.",
       "user_confirmed": false,
-      "source_label_file": "tests/fixtures/labels-positive-sample.json"
+      "source_label_file": "tests/fixtures/labels-positive-sample.json (diverges for services-002, see reviewer note)"
     },
     {
       "chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-competition-001",
@@ -117,18 +117,18 @@
             "aliases": [
               "the Company"
             ],
-            "description": "The Company faces highly competitive markets for its products and services and designs and develops nearly the entire solution for its products.",
+            "description": "The filing company, named in the page footer; this chunk refers to it as the Company.",
             "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-competition-001",
-            "confidence": 0.9,
+            "confidence": 0.85,
             "evidence": "Apple Inc. | 2023 Form 10-K | 2"
           }
         ],
         "relationships": []
       },
       "reviewed": true,
-      "reviewer": "instinct-agent source review 2026-11-26; names and relationships match the reviewed labels in tests/fixtures/labels-positive-sample.json exactly; evidence quotes verified verbatim against the source text",
+      "reviewer": "instinct-agent semantic source review 2026-11-26: evidence quotes verbatim, each description supported by its own quote. Corrections from the fixture labels: services-002 adds HomePod and AppleCare edges/entity (HomePod was an entity without an edge; AppleCare is a service the Company offers) and Apple Inc. evidence is a substantive sentence, not a page footer; competition-001 description trimmed to what its footer evidence supports. Remaining uncertainty: competition-001 describes competitive pressure that arguably supports a Risk entity and FACES edge, left empty to stay conservative; no DEVELOPS edges for iOS/macOS/watchOS though the text says the Company designs and develops its operating systems only in the competition chunk. Not confirmed by the user.",
       "user_confirmed": false,
-      "source_label_file": "tests/fixtures/labels-positive-sample.json"
+      "source_label_file": "tests/fixtures/labels-positive-sample.json (diverges for services-002, see reviewer note)"
     },
     {
       "chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
@@ -141,10 +141,10 @@
             "aliases": [
               "the Company"
             ],
-            "description": "The Company offers wearables, home and accessories products and a range of services including advertising, AppleCare, cloud services and digital content.",
+            "description": "The Company, which offers a portfolio of fee-based service and support products under the AppleCare brand.",
             "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
             "confidence": 0.9,
-            "evidence": "Apple Inc. | 2023 Form 10-K | 1"
+            "evidence": "The Company offers a portfolio of fee-based service and support products under the AppleCare brand."
           },
           {
             "canonical_name": "Apple Watch",
@@ -226,6 +226,15 @@
             "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
             "confidence": 0.95,
             "evidence": "Apple TV+ , which offers exclusive original content and live sports"
+          },
+          {
+            "canonical_name": "AppleCare",
+            "entity_type": "Product",
+            "aliases": [],
+            "description": "A portfolio of fee-based service and support products the Company offers.",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.95,
+            "evidence": "The Company offers a portfolio of fee-based service and support products under the AppleCare brand."
           }
         ],
         "relationships": [
@@ -244,6 +253,14 @@
             "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
             "confidence": 0.9,
             "evidence": "line of wireless headphones includes AirPods"
+          },
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "HomePod",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.9,
+            "evidence": "HomePod and HomePod mini , high-fidelity wireless smart speakers."
           },
           {
             "source_entity": "Apple Inc.",
@@ -276,13 +293,21 @@
             "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
             "confidence": 0.9,
             "evidence": "Apple TV+ , which offers exclusive original content and live sports"
+          },
+          {
+            "source_entity": "Apple Inc.",
+            "target_entity": "AppleCare",
+            "relationship_type": "MENTIONS",
+            "source_chunk_id": "aapl-10k-2023-0000320193-23-000106-excerpt-services-002",
+            "confidence": 0.9,
+            "evidence": "The Company offers a portfolio of fee-based service and support products under the AppleCare brand."
           }
         ]
       },
       "reviewed": true,
-      "reviewer": "instinct-agent source review 2026-11-26; names and relationships match the reviewed labels in tests/fixtures/labels-positive-sample.json exactly; evidence quotes verified verbatim against the source text",
+      "reviewer": "instinct-agent semantic source review 2026-11-26: evidence quotes verbatim, each description supported by its own quote. Corrections from the fixture labels: services-002 adds HomePod and AppleCare edges/entity (HomePod was an entity without an edge; AppleCare is a service the Company offers) and Apple Inc. evidence is a substantive sentence, not a page footer; competition-001 description trimmed to what its footer evidence supports. Remaining uncertainty: competition-001 describes competitive pressure that arguably supports a Risk entity and FACES edge, left empty to stay conservative; no DEVELOPS edges for iOS/macOS/watchOS though the text says the Company designs and develops its operating systems only in the competition chunk. Not confirmed by the user.",
       "user_confirmed": false,
-      "source_label_file": "tests/fixtures/labels-positive-sample.json"
+      "source_label_file": "tests/fixtures/labels-positive-sample.json (diverges for services-002, see reviewer note)"
     }
   ]
 }
