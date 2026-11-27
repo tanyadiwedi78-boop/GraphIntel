@@ -1,25 +1,27 @@
 {
   "purpose": "Golden-20 OpenRouter extraction evaluation. To change the model, edit ONLY the two model settings in this one file: put the model's key in active_model, or add a new OpenRouter model id under models and point active_model at it. Nothing else needs to move.",
   "models": {
-    "ling-3.2-flash": "inclusionai/ling-3.2-flash:free",
     "particle-1": "particle-ai/particle-1:free",
-    "nemotron-3.5-super-vl": "nvidia/nemotron-3.5-super-vl:free"
+    "nemotron-3.5-super-vl": "nvidia/nemotron-3.5-super-vl:free",
+    "ernie-5.5-flash": "baidu/ernie-5.5-flash-preview:free"
   },
-  "active_model": "ling-3.2-flash",
+  "active_model": "particle-1",
   "model_notes": {
-    "ling-3.2-flash": "Free. Supports strict JSON schema (structured_outputs) and reasoning can be turned off (reasoning not mandatory). Verified against the OpenRouter model list on 2026-11-26.",
     "particle-1": "Free. Supports strict JSON schema and explicitly supports reasoning effort none. Verified against the OpenRouter model list on 2026-11-26.",
-    "nemotron-3.5-super-vl": "Free. Supports strict JSON schema and reasoning can be turned off. Verified against the OpenRouter model list on 2026-11-26. Vision-capable; text works fine."
+    "nemotron-3.5-super-vl": "Free. Supports strict JSON schema and reasoning can be turned off. Verified against the OpenRouter model list on 2026-11-26. Vision-capable; text works fine.",
+    "ernie-5.5-flash": "Free. Strict JSON schema declared on its serving endpoint and reasoning effort none supported. Verified against the OpenRouter model list and endpoint list on 2026-11-27."
   },
-  "reasoning": {"effort": "none"},
-  "reasoning_note": "If a model rejects effort none, the response will say so; then use {\"enabled\": false} here instead. Do not just delete the key, or the model may spend hidden reasoning tokens.",
+  "reasoning": {
+    "effort": "none"
+  },
+  "reasoning_note": "If a model rejects effort none, stop and report it; switch this to {\"enabled\": false} only as a deliberate config change, never silently. Do not just delete the key, or the model may spend hidden reasoning tokens.",
   "temperature": 0,
   "max_output_tokens": 4096,
   "chunks_path": "data/golden/golden20-chunks.json",
   "fewshot_path": "configs/golden_fewshot_examples.json",
   "ontology_path": "configs/ontology.json",
   "reports_dir": "reports/golden20",
-  "chunk_limit": null,
+  "chunk_limit": 2,
   "chunk_limit_note": "Set to 2 for the first live smoke check, then back to null for the full 20-chunk run.",
   "cost_note": "All listed models are free-tier, so cost_usd is expected to be provider-reported 0. When both sides of a comparison are free, there is no dollar saving to measure; compare tokens, latency, schema pass and extraction quality instead."
 }

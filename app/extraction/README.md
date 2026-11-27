@@ -62,3 +62,15 @@ Provider-reported usage fields only are counted. Missing token fields stay null,
 ## Validation before a future real run
 
 Run offline tests first. Verify laptop file state before applying replacements. Then verify exact current model/account quotas, free-tier/no-billing state, token ceilings and new-job pricing. Use a small approved pilot followed by a separately approved canary only after review. Do not force live failures with bad credentials or tiny timeouts. No full-corpus execution, hosted backend, telemetry export, model change or graph loading is implied by this implementation.
+
+## Scoring a golden-20 run (scripts/score_golden_run.py)
+
+Offline scoring of one saved run folder against reviewed labels. Entities get two separate views (name-only: a match shares any normalized name or alias with a reviewed label; typed: the entity_type must also match, so a type mismatch is never silently counted correct). Relationships score separately against reviewed (source, target, type) triples, alias-resolved. Names, aliases, types and quotes are normalized (whitespace squashed, case folded) before matching.
+
+Labels may be incomplete, so an unmatched prediction is a false positive only when the reviewer marked that chunk's labels complete; under incomplete labels it is an unverified extra, reported outside precision and never called a hallucination. Every prediction carries two mechanical review signals, evidence_verbatim (the quote appears in the chunk text) and name_present (the name literally appears); neither is a correctness verdict: a name can be absent yet valid (normalization, abbreviation), and two present names prove nothing about a claimed relationship. There is no hallucination rate from lexical proxies. A chunk with complete, empty labels is the noise case, where every prediction counts. Chunks without labels are skipped and listed, never scored as zero. The score is written as a new `score-<timestamp>.json` inside the run folder and never overwrites.
+
+IMPROVE notes, not done yet:
+- Alias handling comes from the labels file only; a shared alias table from entity resolution would catch more matches.
+- No per-entity-type breakdown yet.
+- Relative-to-reference-model gating (Tanya's >=90% of reference F1 rule) is not implemented; it needs a defined reference run first, and reference output is not ground truth.
+- Cross-model comparison across run folders is manual for now.
