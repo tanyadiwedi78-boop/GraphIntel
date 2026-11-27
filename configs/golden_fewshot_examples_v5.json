@@ -1,0 +1,85 @@
+{
+  "purpose": "Few-shot examples for the golden-20 extraction prompt (golden-fewshot-v5), adapted from Tanya's supplied prompt of 2026-11-27 and approved by her in chat the same day. Example chunks are excluded from the golden-20 evaluation set, so examples never leak into scoring.",
+  "frozen": false,
+  "provenance": "User-supplied examples, agent-adapted to the frozen contract and ontology. user_confirmed true (approved the full rendered prompt in chat, 2026-11-27). Freezes at first run.",
+  "examples": [
+    {
+      "chunk_id": "ex-v5-1",
+      "text": "On May 14, 2024, Acme Corp completed the acquisition of Beta Systems for $450 million in cash. In Q2 2024, Acme Corp's Cloud Segment revenue increased 18% to $1.2 billion, though management warned that ongoing semiconductor shortages could delay hardware deliveries.",
+      "output": {
+        "entities": [
+          {
+            "canonical_name": "Acme Corp",
+            "entity_type": "Company",
+            "aliases": [],
+            "description": "Completed the acquisition of Beta Systems for $450 million in cash on May 14, 2024.",
+            "source_chunk_id": "ex-v5-1",
+            "confidence": 1.0,
+            "evidence": "On May 14, 2024, Acme Corp completed the acquisition of Beta Systems for $450 million in cash."
+          },
+          {
+            "canonical_name": "Beta Systems",
+            "entity_type": "Company",
+            "aliases": [],
+            "description": "Acquired by Acme Corp for $450 million in cash on May 14, 2024.",
+            "source_chunk_id": "ex-v5-1",
+            "confidence": 1.0,
+            "evidence": "Acme Corp completed the acquisition of Beta Systems for $450 million in cash."
+          },
+          {
+            "canonical_name": "Cloud Segment revenue",
+            "entity_type": "FinancialMetric",
+            "aliases": [],
+            "description": "Q2 2024 revenue of Acme Corp's Cloud Segment, up 18% to $1.2 billion.",
+            "source_chunk_id": "ex-v5-1",
+            "confidence": 1.0,
+            "evidence": "In Q2 2024, Acme Corp's Cloud Segment revenue increased 18% to $1.2 billion"
+          },
+          {
+            "canonical_name": "Semiconductor Shortages",
+            "entity_type": "Risk",
+            "aliases": [],
+            "description": "Ongoing shortages that management warned could delay hardware deliveries.",
+            "source_chunk_id": "ex-v5-1",
+            "confidence": 0.9,
+            "evidence": "management warned that ongoing semiconductor shortages could delay hardware deliveries."
+          }
+        ],
+        "relationships": [
+          {
+            "source_entity": "Acme Corp",
+            "target_entity": "Beta Systems",
+            "relationship_type": "ACQUIRED",
+            "source_chunk_id": "ex-v5-1",
+            "confidence": 1.0,
+            "evidence": "On May 14, 2024, Acme Corp completed the acquisition of Beta Systems for $450 million in cash."
+          },
+          {
+            "source_entity": "Acme Corp",
+            "target_entity": "Cloud Segment revenue",
+            "relationship_type": "REPORTS",
+            "source_chunk_id": "ex-v5-1",
+            "confidence": 1.0,
+            "evidence": "In Q2 2024, Acme Corp's Cloud Segment revenue increased 18% to $1.2 billion"
+          },
+          {
+            "source_entity": "Acme Corp",
+            "target_entity": "Semiconductor Shortages",
+            "relationship_type": "FACES",
+            "source_chunk_id": "ex-v5-1",
+            "confidence": 0.8,
+            "evidence": "In Q2 2024, Acme Corp's Cloud Segment revenue increased 18% to $1.2 billion, though management warned that ongoing semiconductor shortages could delay hardware deliveries."
+          }
+        ]
+      }
+    },
+    {
+      "chunk_id": "ex-v5-2",
+      "text": "Pursuant to the requirements of the Securities Exchange Act of 1934, the registrant has duly caused this report to be signed on its behalf by the undersigned thereunto duly authorized.",
+      "output": {
+        "entities": [],
+        "relationships": []
+      }
+    }
+  ]
+}

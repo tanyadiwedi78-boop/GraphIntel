@@ -60,8 +60,10 @@ EXCLUDE_FILES = ['tests/fixtures/sample5-chunks.json',
 
 # Few-shot examples shown inside the prompt. A golden chunk that shares text
 # with an example would leak the answer into scoring, so candidates are also
-# excluded by text overlap, not only by chunk id.
+# excluded by text overlap, not only by chunk id. The file is read from the
+# golden run config, so exclusion always follows the examples a run uses.
 FEWSHOT_FILE = 'configs/golden_fewshot_examples.json'
+RUN_CONFIG = 'configs/golden_extraction.json'
 OVERLAP_WINDOW = 160
 OVERLAP_MIN = 80
 
@@ -139,10 +141,21 @@ def squash(text: str) -> str:
     return ' '.join(str(text).split())
 
 
+def configured_fewshot_file() -> str:
+    """The examples file the golden run is configured to use."""
+    path = PROJECT_FOLDER / RUN_CONFIG
+    if path.exists():
+        config = json.loads(path.read_text(encoding='utf-8'))
+        fewshot = config.get('fewshot_path')
+        if fewshot:
+            return str(fewshot)
+    return FEWSHOT_FILE
+
+
 def example_texts() -> list:
     """All few-shot example source texts, plus earlier sample chunk texts."""
     texts = []
-    path = PROJECT_FOLDER / FEWSHOT_FILE
+    path = PROJECT_FOLDER / configured_fewshot_file()
     if path.exists():
         document = json.loads(path.read_text(encoding='utf-8'))
         for example in document.get('examples', []):

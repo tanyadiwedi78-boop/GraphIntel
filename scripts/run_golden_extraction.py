@@ -12,7 +12,7 @@ Needs OPENROUTER_API_KEY in the environment (the .env on your machine). The
 script never asks for a key and never prints one.
 
 What a run does, one chunk at a time, in order:
-  1. builds the frozen few-shot prompt (golden-fewshot-v4),
+  1. builds the frozen few-shot prompt (the version GOLDEN_PROMPT_VERSION names),
   2. calls the configured free model with a strict JSON schema,
   3. validates the answer against the frozen contract and the source rules,
   4. appends one metrics row (tokens, cached/reasoning tokens, reported cost,
@@ -174,6 +174,8 @@ class GoldenRun:
         return {
             'model': self.model_id,
             'prompt_version': GOLDEN_PROMPT_VERSION,
+            'fewshot_path': self.config['fewshot_path'],
+            'fewshot_example_ids': [str(example.get('chunk_id')) for example in self.examples],
             'chunks_attempted': len(self.results),
             'chunks_ok': sum(1 for item in self.results if item['ok']),
             'stopped_early': self.stopped_early,

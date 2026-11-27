@@ -18,7 +18,7 @@
   "temperature": 0,
   "max_output_tokens": 4096,
   "chunks_path": "data/golden/golden20-chunks.json",
-  "fewshot_path": "configs/golden_fewshot_examples.json",
+  "fewshot_path": "configs/golden_fewshot_examples_v5.json",
   "ontology_path": "configs/ontology.json",
   "reports_dir": "reports/golden20",
   "chunk_limit": 2,
