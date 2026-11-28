@@ -16,8 +16,17 @@ What a run does, one chunk at a time, in order:
   2. calls the configured free model with a strict JSON schema,
   3. validates the answer against the frozen contract and the source rules,
   4. appends one metrics row (tokens, cached/reasoning tokens, reported cost,
-     served provider, schema pass, counts, latency),
+     served provider, schema pass, counts, latency, chunk category),
   5. saves the raw parsed answer as evidence.
+  6. if telemetry is enabled in the config, exports one span per chunk over
+     OTLP HTTP (optional; extraction never depends on it).
+
+Telemetry: off by default. With "telemetry": {"enabled": true} and the
+observability extras installed (pip install -r requirements-observability.txt)
+each chunk becomes an OpenTelemetry span, normally viewed in a local Phoenix
+started with `phoenix serve`. Spans carry metadata only - never chunk text,
+prompts, answers or keys - and any telemetry failure just prints a warning;
+metrics.jsonl stays the durable record.
 
 Safety: a 401/402/403/429 stops the whole run at once - no retries, no
 guessing about quota. Every run writes NEW files under
@@ -33,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +50,7 @@ PROJECT_FOLDER = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_FOLDER))
 
 from app.extraction import chunk_metrics
+from app.extraction import golden_telemetry
 from app.extraction.contracts import check_source_contract, ontology_contract
 from app.extraction.golden_openrouter import GoldenCallError, OpenRouterClient
 from app.extraction.golden_prompt import GOLDEN_PROMPT_VERSION, build_golden_prompt
@@ -118,47 +129,53 @@ class GoldenRun:
         return True
 
     def validate(self, raw_text, chunk):
-        """Return (payload or None, list of problems)."""
+        """Return (payload or None, list of problems, mechanical checks)."""
         if not raw_text:
-            return None, ['empty or unusable response text']
+            return None, ['empty or unusable response text'], None
         try:
             payload = self.contract.model_validate_json(raw_text)
         except ValueError as error:
-            return None, ['schema validation failed: ' + str(error)[:200]]
+            return None, ['schema validation failed: ' + str(error)[:200]], None
         checks = check_source_contract(payload, chunk, self.ontology)
-        return payload, checks['problems']
+        return payload, checks['problems'], checks
 
-    def record_failure(self, metrics_path: Path, chunk_id: str, error: GoldenCallError) -> None:
+    def record_failure(self, metrics_path: Path, chunk: dict, error: GoldenCallError):
+        chunk_id = str(chunk['chunk_id'])
         label = 'http ' + str(error.status)
         row = chunk_metrics.record_row(chunk_id, self.model_id, None, False,
                                        'unavailable', 'unavailable', 'unavailable',
-                                       error=label)
+                                       error=label,
+                                       chunk_category=chunk.get('golden_category'))
         chunk_metrics.append_row(metrics_path, row)
         self.results.append({'chunk_id': chunk_id, 'ok': False, 'error': label})
+        return row, None
 
-    def record_answer(self, metrics_path: Path, chunk: dict, response: dict) -> None:
+    def record_answer(self, metrics_path: Path, chunk: dict, response: dict):
         chunk_id = str(chunk['chunk_id'])
         raw_text = response.get('text')
-        payload, problems = self.validate(raw_text, chunk)
+        payload, problems, checks = self.validate(raw_text, chunk)
         ok = payload is not None and not problems
         row = chunk_metrics.record_row(
             chunk_id, self.model_id, response, ok,
             len(payload.entities) if payload else 'unavailable',
             len(payload.relationships) if payload else 'unavailable',
             response.get('latency_ms'),
-            error=None if ok else '; '.join(problems)[:200])
+            error=None if ok else '; '.join(problems)[:200],
+            chunk_category=chunk.get('golden_category'))
         chunk_metrics.append_row(metrics_path, row)
         self.results.append({'chunk_id': chunk_id, 'ok': ok, 'problems': problems,
                              'payload': json.loads(raw_text) if payload else None,
                              'raw_text': None if payload else raw_text})
+        return row, checks
 
-    def run_chunk(self, metrics_path: Path, chunk: dict) -> None:
+    def run_chunk(self, metrics_path: Path, chunk: dict):
+        """Run one chunk. Returns (row, checks) for logging and telemetry."""
         chunk_id = str(chunk['chunk_id'])
         prompt = build_golden_prompt(chunk, self.ontology, self.examples)
         try:
             response = self.completer(prompt)
         except GoldenCallError as error:
-            self.record_failure(metrics_path, chunk_id, error)
+            row, checks = self.record_failure(metrics_path, chunk, error)
             if error.status in STOP_STATUSES:
                 print('Stop: the provider answered HTTP ' + str(error.status)
                       + ' on chunk ' + chunk_id + '.')
@@ -167,8 +184,8 @@ class GoldenRun:
             else:
                 print('Chunk ' + chunk_id + ' failed (HTTP ' + str(error.status)
                       + '); recorded, moving on.')
-            return
-        self.record_answer(metrics_path, chunk, response)
+            return row, checks
+        return self.record_answer(metrics_path, chunk, response)
 
     def summary(self) -> dict:
         return {
@@ -194,10 +211,18 @@ class GoldenRun:
             return 2
         run_folder = fresh_run_folder(PROJECT_FOLDER / self.config['reports_dir'], self.model_id)
         metrics_path = run_folder / 'metrics.jsonl'
-        for chunk in chunks:
-            self.run_chunk(metrics_path, chunk)
-            if self.stopped_early:
-                break
+        telemetry = golden_telemetry.start(self.config)
+        try:
+            for chunk in chunks:
+                started_at = time.time()
+                row, checks = self.run_chunk(metrics_path, chunk)
+                if telemetry is not None:
+                    telemetry.record_chunk(row, started_at, time.time(), checks)
+                if self.stopped_early:
+                    break
+        finally:
+            if telemetry is not None:
+                telemetry.close()
         summary = self.summary()
         (run_folder / 'results.json').write_text(
             json.dumps({'summary': summary, 'results': self.results}, indent=2) + '\n',

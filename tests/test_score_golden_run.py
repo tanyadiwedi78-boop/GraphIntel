@@ -204,3 +204,30 @@ def test_label_coverage_is_visible(tmp_path):
     coverage = report['label_coverage']
     assert coverage['complete_labels'] == 1 and coverage['incomplete_labels'] == 1
     assert 'Label coverage: 1 complete, 1 incomplete' in result.stdout
+
+
+# --- quote containment and certified noise (28 Nov) ---------------------------
+
+def test_quote_containment_counts_all_predictions():
+    paraphrased = dict(PRED_ENT_OK, evidence='Acme makes widgets (paraphrase)')
+    result = score_chunk(CHUNK, payload(entities=[PRED_ENT_OK, paraphrased],
+                                        relationships=[PRED_REL_OK]),
+                         label(entities=[REF_ENT], relationships=[REF_REL], complete=True))
+    containment = result['quote_containment']
+    assert containment['checked'] == 3
+    assert containment['verbatim'] == 2
+    assert containment['rate'] == round(2 / 3, 4)
+
+
+def test_reviewed_empty_chunk_counts_false_extractions():
+    result = score_chunk(CHUNK, payload(entities=[PRED_ENT_OK]),
+                         label(complete=True))
+    assert result['reviewed_empty'] is True
+    assert result['false_extractions_on_reviewed_empty'] == 1
+
+
+def test_unreviewed_empty_labels_certify_nothing():
+    result = score_chunk(CHUNK, payload(entities=[PRED_ENT_OK]),
+                         label(complete=False))
+    assert result['reviewed_empty'] is False
+    assert result['false_extractions_on_reviewed_empty'] == 0

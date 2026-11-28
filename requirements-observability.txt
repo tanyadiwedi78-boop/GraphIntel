@@ -1,0 +1,15 @@
+# Optional observability extras for the golden-20 evaluation.
+# The base runner works without these; install only to watch traces.
+# Usage: pip install -r requirements-observability.txt && phoenix serve
+# Phoenix then listens on http://localhost:6006 (UI + OTLP HTTP traces).
+# Docs checked 2026-11-28: opentelemetry.io (Python exporters) and
+# arize.com/docs/phoenix/get-started.
+#
+# Tested versions (2026-11-28, Linux sandbox, live Phoenix export verified):
+#   opentelemetry-sdk 1.45.2, opentelemetry-exporter-otlp-proto-http 1.45.2,
+#   arize-phoenix 20.16.0.
+# Phoenix majors change APIs; stay on the tested major until re-tested.
+opentelemetry-sdk>=1.45,<1.46
+opentelemetry-exporter-otlp-proto-http>=1.45,<1.46
+# Optional local trace viewer. Heavier install; only needed while viewing.
+arize-phoenix>=20.16,<21

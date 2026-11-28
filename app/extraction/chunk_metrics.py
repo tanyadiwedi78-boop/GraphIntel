@@ -10,9 +10,12 @@ Honesty rules baked in:
   free model's cost, or zero cached tokens) is a real number and passes.
 
 Columns, in the order requested for the evaluation:
-chunk_id, model, served_provider, prompt_tokens, completion_tokens,
-cached_tokens, reasoning_tokens, cost_usd, schema_valid, entity_count,
-edge_count, latency_ms.
+chunk_id, chunk_category, model, served_provider, prompt_tokens,
+completion_tokens, cached_tokens, reasoning_tokens, cost_usd, schema_valid,
+entity_count, edge_count, latency_ms.
+
+chunk_category comes from the golden set (golden_category), not the provider;
+a chunk without one reads "unassigned".
 """
 from __future__ import annotations
 
@@ -22,10 +25,10 @@ from typing import Any, Dict, List, Optional
 
 UNAVAILABLE = 'unavailable'
 
-METRIC_FIELDS = ['chunk_id', 'model', 'served_provider', 'prompt_tokens',
-                 'completion_tokens', 'cached_tokens', 'reasoning_tokens',
-                 'cost_usd', 'schema_valid', 'entity_count', 'edge_count',
-                 'latency_ms']
+METRIC_FIELDS = ['chunk_id', 'chunk_category', 'model', 'served_provider',
+                 'prompt_tokens', 'completion_tokens', 'cached_tokens',
+                 'reasoning_tokens', 'cost_usd', 'schema_valid', 'entity_count',
+                 'edge_count', 'latency_ms']
 
 # Fields that must be provider-reported numbers/strings for the log to pass
 # verification. schema_valid is reported separately as a check, not a gap.
@@ -81,11 +84,13 @@ def served_provider_of(response: Dict[str, Any]) -> Any:
 
 def record_row(chunk_id: str, model: str, response: Optional[Dict[str, Any]],
                schema_valid: bool, entity_count: Any, edge_count: Any,
-               latency_ms: Any, error: Optional[str] = None) -> Dict[str, Any]:
+               latency_ms: Any, error: Optional[str] = None,
+               chunk_category: Optional[str] = None) -> Dict[str, Any]:
     """Build one metrics row from a provider response (or a failed attempt)."""
     usage = response.get('usage') if isinstance(response, dict) else None
     row = {
         'chunk_id': chunk_id,
+        'chunk_category': str(chunk_category) if chunk_category else 'unassigned',
         'model': model,
         'served_provider': served_provider_of(response) if isinstance(response, dict) else UNAVAILABLE,
         'prompt_tokens': _reported(_walk(usage, ['prompt_tokens'])),

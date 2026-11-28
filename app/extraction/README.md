@@ -74,3 +74,13 @@ IMPROVE notes, not done yet:
 - No per-entity-type breakdown yet.
 - Relative-to-reference-model gating (Tanya's >=90% of reference F1 rule) is not implemented; it needs a defined reference run first, and reference output is not ground truth.
 - Cross-model comparison across run folders is manual for now.
+
+## Golden-run tracing and operations summary (28 Nov)
+
+Two additions, both offline-friendly and both leaving `metrics.jsonl` as the durable record.
+
+**Operations summary** - `python scripts/summarize_golden_run.py RUN_FOLDER` prints and saves `summary-<timestamp>.json`: first-pass schema rate (denominator counts every attempted chunk, failed calls included), token totals with a per-1,000-chunk projection, latency with the slowest chunks, served-provider distribution, and a per-category breakdown (the runner now records each chunk's `golden_category` on its metrics row). Cost uses provider-reported numbers only: unreported rows make the total "unknown", reported zeros stay zeros (free models report 0), and no percentage saving is ever computed because there is no reference run. Served-provider counts describe routing, never failover - the runner has no failover logic.
+
+**OpenTelemetry tracing** - optional and off by default. Install the extras (`pip install -r requirements-observability.txt`), start a local Phoenix (`phoenix serve`, UI plus OTLP HTTP on http://localhost:6006), then set `"telemetry": {"enabled": true}` in `configs/golden_extraction.json`. Each chunk attempt exports one `golden_extraction.chunk` span with metadata only: ids, category, tokens, cost, latency, served provider, schema result, extraction counts, mechanical check tallies (problems, grounding holds) and a classified error label (`http 429`, `schema validation failed`) - never chunk text, prompts, answers or keys. Semantic grounding is marked `not_reviewed` on every span; reviewed quality stays with the scorer. Any telemetry setup or export failure prints a warning and the run continues unaffected. Install/runtime guidance checked 2026-11-28 against opentelemetry.io (Python exporters) and arize.com/docs/phoenix/get-started. Phoenix runs locally (no account, no key) but is a heavier install; on the 4 GB laptop treat it as a viewer to start only while looking at traces - actual performance there is untested, not a measured claim.
+
+**Scorer additions (28 Nov)** - the score report now also carries `quote_containment` (the share of ALL predictions whose evidence is a verbatim quote; mechanical, explicitly not semantic grounding) and `noise_review` (false extractions counted only on chunks whose reviewed labels are complete AND empty - certified noise; boilerplate-category chunks without such review are listed as uncertified, never judged).

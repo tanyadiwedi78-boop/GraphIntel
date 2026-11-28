@@ -23,5 +23,10 @@
   "reports_dir": "reports/golden20",
   "chunk_limit": 2,
   "chunk_limit_note": "Set to 2 for the first live smoke check, then back to null for the full 20-chunk run.",
-  "cost_note": "All listed models are free-tier, so cost_usd is expected to be provider-reported 0. When both sides of a comparison are free, there is no dollar saving to measure; compare tokens, latency, schema pass and extraction quality instead."
+  "cost_note": "All listed models are free-tier, so cost_usd is expected to be provider-reported 0. When both sides of a comparison are free, there is no dollar saving to measure; compare tokens, latency, schema pass and extraction quality instead.",
+  "telemetry": {
+    "enabled": false,
+    "otlp_endpoint": "http://localhost:6006/v1/traces",
+    "note": "Off by default. To watch traces: pip install -r requirements-observability.txt, start Phoenix with `phoenix serve`, then set enabled to true. Extraction never depends on Phoenix; spans carry metadata only, never chunk text, prompts or keys. metrics.jsonl stays the durable record."
+  }
 }

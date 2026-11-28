@@ -244,6 +244,24 @@ def classify_extras(predicted: List[Dict[str, Any]], unmatched: List[int],
     return extras, wrong
 
 
+def quote_containment(payload: Dict[str, Any], source: str) -> Dict[str, Any]:
+    """Share of ALL predictions whose evidence is a verbatim quote.
+
+    A mechanical check over every predicted entity and relationship, matched
+    or not. Quote containment is not semantic grounding: a contained quote can
+    still fail to support the claim, and a paraphrase can still be right.
+    """
+    checked = 0
+    verbatim = 0
+    for item in (payload.get('entities') or []) + (payload.get('relationships') or []):
+        checked += 1
+        quote = normalize(item.get('evidence'))
+        if quote and quote in source:
+            verbatim += 1
+    return {'checked': checked, 'verbatim': verbatim,
+            'rate': round(verbatim / checked, 4) if checked else None}
+
+
 def score_chunk(chunk: Dict[str, Any], payload: Dict[str, Any],
                 label: Dict[str, Any]) -> Dict[str, Any]:
     """Score one chunk's saved payload against its reviewed labels."""
@@ -251,13 +269,22 @@ def score_chunk(chunk: Dict[str, Any], payload: Dict[str, Any],
     complete = bool(label.get('complete'))
     reference_entities = label.get('entities') or []
     alias_map = alias_map_of(reference_entities)
+    predicted_entities = payload.get('entities') or []
+    predicted_relationships = payload.get('relationships') or []
+    reviewed_empty = complete and not reference_entities and not (label.get('relationships') or [])
     return {
         'reference_complete': complete,
-        'entities': score_entities(payload.get('entities') or [],
+        'entities': score_entities(predicted_entities,
                                    reference_entities, source, complete),
-        'relationships': score_relationships(payload.get('relationships') or [],
+        'relationships': score_relationships(predicted_relationships,
                                              label.get('relationships') or [],
                                              alias_map, source, complete),
+        'quote_containment': quote_containment(payload, source),
+        # A chunk is certified noise only when review marked its labels
+        # complete AND empty. Boilerplate category alone certifies nothing.
+        'reviewed_empty': reviewed_empty,
+        'false_extractions_on_reviewed_empty': (
+            len(predicted_entities) + len(predicted_relationships)) if reviewed_empty else 0,
     }
 
 
@@ -295,6 +322,9 @@ def main() -> int:
               'entities_typed': {'matched': 0, 'wrong': 0, 'reference': 0, 'evidence_problems': 0},
               'relationships': {'matched': 0, 'wrong': 0, 'reference': 0, 'evidence_problems': 0}}
     unverified = {'entities': 0, 'relationships': 0}
+    containment = {'checked': 0, 'verbatim': 0}
+    noise_false_extractions = 0
+    reviewed_empty_chunks = []
     for result in document.get('results') or []:
         chunk_id = str(result.get('chunk_id'))
         label = labels.get(chunk_id)
@@ -316,6 +346,11 @@ def main() -> int:
             for extra in scored[side]['extras']:
                 if extra['class'] == 'unverified':
                     unverified[side] += 1
+        containment['checked'] += scored['quote_containment']['checked']
+        containment['verbatim'] += scored['quote_containment']['verbatim']
+        if scored['reviewed_empty']:
+            reviewed_empty_chunks.append(chunk_id)
+            noise_false_extractions += scored['false_extractions_on_reviewed_empty']
 
     schema_rows = len(metrics)
     schema_pass = sum(1 for row in metrics if row.get('schema_valid') is True)
@@ -329,6 +364,11 @@ def main() -> int:
         'note': 'Precision on incomplete-label chunks excludes unverified extras; '
                 'a high precision there is not a complete evaluation.',
     }
+    uncertified_boilerplate = sorted(
+        str(chunk.get('chunk_id'))
+        for chunk in chunks.values()
+        if chunk.get('golden_category') == 'boilerplate'
+        and str(chunk.get('chunk_id')) not in reviewed_empty_chunks)
     report = {
         'run_folder': str(run_folder),
         'scored_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
@@ -345,6 +385,22 @@ def main() -> int:
                              totals['relationships']['reference']),
         'unverified_entity_extras': unverified['entities'],
         'unverified_relationship_extras': unverified['relationships'],
+        'quote_containment': {
+            'checked': containment['checked'],
+            'verbatim': containment['verbatim'],
+            'rate': round(containment['verbatim'] / containment['checked'], 4)
+            if containment['checked'] else None,
+            'note': 'Mechanical verbatim-quote share over all predictions. Not semantic '
+                    'grounding: a contained quote can still fail to support the claim.',
+        },
+        'noise_review': {
+            'reviewed_empty_chunks': reviewed_empty_chunks,
+            'false_extractions_on_reviewed_empty': noise_false_extractions,
+            'uncertified_boilerplate_chunks': uncertified_boilerplate,
+            'note': 'A chunk is certified noise only after review marks its labels '
+                    'complete and empty. Boilerplate category alone certifies nothing; '
+                    'unreviewed boilerplate chunks are listed, not judged.',
+        },
         'evidence_problems': sum(totals[key]['evidence_problems'] for key in totals),
         'per_chunk': per_chunk,
         'unscored_chunks': unscored,
@@ -379,6 +435,17 @@ def main() -> int:
     print('Unverified extras (not penalized): entities '
           + str(report['unverified_entity_extras']) + ', relationships '
           + str(report['unverified_relationship_extras']))
+    containment_note = report['quote_containment']
+    print('Quote containment (mechanical, not grounding): '
+          + str(containment_note['verbatim']) + ' of ' + str(containment_note['checked'])
+          + ' predictions carry a verbatim quote')
+    noise = report['noise_review']
+    print('Reviewed-empty (certified noise) chunks: ' + str(len(noise['reviewed_empty_chunks']))
+          + ', false extractions on them: '
+          + str(noise['false_extractions_on_reviewed_empty']))
+    if noise['uncertified_boilerplate_chunks']:
+        print('Boilerplate chunks not yet certified by review: '
+              + ', '.join(noise['uncertified_boilerplate_chunks']))
     if unscored:
         print('Unscored chunks (no labels): ' + ', '.join(unscored))
     print('Score saved: ' + str(out_path))
